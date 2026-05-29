@@ -1,0 +1,13 @@
+Django>=5.0
+djangorestframework
+djangorestframework-simplejwt
+django-cors-headers
+django-filter
+psycopg2-binary
+python-dotenv
+celery
+redis
+weasyprint
+python-barcode
+python-dateutil
+qrcode

@@ -1,0 +1,321 @@
+from rest_framework import status
+from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.accounting.models import BankAccount, Expense
+from apps.accounts.models import ActivityLog, Business, User
+from apps.items.models import Item
+from apps.parties.models import Party
+from apps.payments.models import PaymentIn, PaymentOut
+from apps.purchases.models import PurchaseInvoice
+from apps.sales.models import SalesInvoice
+
+
+class TenantOnboardingPermissionTests(APITestCase):
+    def auth_as(self, user):
+        token = RefreshToken.for_user(user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def make_user(self, business, mobile, role="admin", name="Tenant User"):
+        return User.objects.create_user(
+            mobile=mobile,
+            business=business,
+            role=role,
+            first_name=name,
+            is_active=True,
+        )
+
+    def test_registration_creates_clean_tenant_without_touching_demo_data(self):
+        demo_business = Business.objects.create(name="CSM SILKS", phone="8608633066")
+        Party.objects.create(business=demo_business, name="Demo Customer", party_type="customer")
+        Item.objects.create(business=demo_business, name="Demo Saree", selling_price=1000, purchase_price=700)
+
+        response = self.client.post("/api/v1/auth/register", {
+            "business_name": "Fresh Textile House",
+            "owner_name": "Fresh Owner",
+            "mobile": "9000000001",
+            "email": "owner@example.com",
+            "state": "Tamil Nadu",
+            "invoice_prefix": "FTH",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        business = Business.objects.get(name="Fresh Textile House")
+        self.assertEqual(User.objects.get(mobile="9000000001").business, business)
+        self.assertEqual(Party.objects.filter(business=business).count(), 0)
+        self.assertEqual(Item.objects.filter(business=business).count(), 0)
+        self.assertEqual(Party.objects.filter(business=demo_business).count(), 1)
+        self.assertEqual(Item.objects.filter(business=demo_business).count(), 1)
+        self.assertEqual(response.data["counts"]["items"], 0)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['tokens']['access']}")
+        workspace_response = self.client.get("/api/v1/auth/workspace")
+        self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(workspace_response.data["business"]["name"], "Fresh Textile House")
+        self.assertEqual(workspace_response.data["counts"], {
+            "parties": 0,
+            "items": 0,
+            "salesInvoices": 0,
+            "purchaseInvoices": 0,
+            "paymentsIn": 0,
+            "paymentsOut": 0,
+        })
+        self.assertEqual(workspace_response.data["parties"], [])
+        self.assertEqual(workspace_response.data["items"], [])
+        self.assertEqual(workspace_response.data["godowns"], [])
+        self.assertEqual(workspace_response.data["staff"], [])
+        self.assertEqual({row["mobile"] for row in workspace_response.data["users"]}, {"9000000001"})
+
+    def test_registration_normalizes_and_rejects_duplicate_mobile(self):
+        business = Business.objects.create(name="Existing Textile", phone="9000000101")
+        self.make_user(business, "9000000101", "admin", "Existing")
+
+        response = self.client.post("/api/v1/auth/register", {
+            "business_name": "Duplicate Textile",
+            "owner_name": "Duplicate Owner",
+            "mobile": " 90000 00101 ",
+            "invoice_prefix": "DUP",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Business.objects.filter(name="Duplicate Textile").exists())
+
+    def test_registration_rejects_invalid_gstin_and_prefix(self):
+        response = self.client.post("/api/v1/auth/register", {
+            "business_name": "Invalid Textile",
+            "owner_name": "Invalid Owner",
+            "mobile": "9000000111",
+            "gstin": "BADGST",
+            "invoice_prefix": "TOO-LONG-PREFIX",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Business.objects.filter(name="Invalid Textile").exists())
+
+    def test_workspace_and_user_list_stay_inside_active_tenant(self):
+        business_a = Business.objects.create(name="Tenant A", phone="9000000011")
+        business_b = Business.objects.create(name="Tenant B", phone="9000000022")
+        admin_a = self.make_user(business_a, "9000000012", "admin", "Admin A")
+        self.make_user(business_b, "9000000023", "admin", "Admin B")
+        Party.objects.create(business=business_a, name="Tenant A Customer", party_type="customer")
+        Party.objects.create(business=business_b, name="Tenant B Customer", party_type="customer")
+
+        self.auth_as(admin_a)
+        users_response = self.client.get("/api/v1/auth/users/")
+        workspace_response = self.client.get("/api/v1/auth/workspace")
+
+        self.assertEqual(users_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
+        self.assertEqual({row["mobile"] for row in users_response.data}, {"9000000012"})
+        party_names = {row["name"] for row in workspace_response.data["parties"]}
+        self.assertIn("Tenant A Customer", party_names)
+        self.assertNotIn("Tenant B Customer", party_names)
+
+    def test_dashboard_uses_live_tenant_transactions_and_stats(self):
+        business = Business.objects.create(name="Dashboard Tenant", phone="9000000071")
+        other_business = Business.objects.create(name="Other Dashboard Tenant", phone="9000000072")
+        admin = self.make_user(business, "9000000073", "admin", "Admin")
+        customer = Party.objects.create(business=business, name="Dashboard Customer", party_type="customer")
+        supplier = Party.objects.create(business=business, name="Dashboard Supplier", party_type="supplier")
+        other_customer = Party.objects.create(business=other_business, name="Other Customer", party_type="customer")
+
+        SalesInvoice.objects.create(
+            business=business,
+            invoice_number="INV-LIVE-001",
+            party=customer,
+            subtotal=1000,
+            taxable_amount=1000,
+            total_amount=1000,
+            paid_amount=250,
+            status="partial",
+        )
+        PurchaseInvoice.objects.create(
+            business=business,
+            invoice_number="PUR-LIVE-001",
+            party=supplier,
+            subtotal=600,
+            taxable_amount=600,
+            total_amount=600,
+            paid_amount=100,
+            status="partial",
+        )
+        PaymentIn.objects.create(
+            business=business,
+            payment_number="PMTIN-LIVE-001",
+            party=customer,
+            amount_received=250,
+            payment_mode="cash",
+        )
+        PaymentIn.objects.create(
+            business=business,
+            payment_number="PMTIN-VOID-001",
+            party=customer,
+            amount_received=250,
+            payment_mode="cash",
+            status="void",
+        )
+        PaymentOut.objects.create(
+            business=business,
+            payment_number="PMTOUT-LIVE-001",
+            party=supplier,
+            amount_paid=100,
+            payment_mode="cash",
+        )
+        PaymentOut.objects.create(
+            business=business,
+            payment_number="PMTOUT-VOID-001",
+            party=supplier,
+            amount_paid=100,
+            payment_mode="cash",
+            status="void",
+        )
+        Expense.objects.create(
+            business=business,
+            expense_number="EXP-LIVE-001",
+            expense_category="Packing",
+            total_amount=75,
+            paid_amount=75,
+        )
+        BankAccount.objects.create(
+            business=business,
+            account_name="Main Cash",
+            account_number="CASH",
+            ifsc_code="CASH000",
+            bank_name="Cash",
+            current_balance=500,
+        )
+        SalesInvoice.objects.create(
+            business=other_business,
+            invoice_number="INV-OTHER-001",
+            party=other_customer,
+            subtotal=9999,
+            taxable_amount=9999,
+            total_amount=9999,
+            paid_amount=0,
+            status="unpaid",
+        )
+        SalesInvoice.objects.create(
+            business=business,
+            invoice_number="INV-CANCELLED-001",
+            party=customer,
+            subtotal=500,
+            taxable_amount=500,
+            total_amount=500,
+            paid_amount=0,
+            status="cancelled",
+        )
+
+        self.auth_as(admin)
+        response = self.client.get("/api/v1/auth/workspace")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dashboard = response.data["dashboard"]
+        self.assertEqual(dashboard["stats"]["totalSales"], 1000.0)
+        self.assertEqual(dashboard["stats"]["totalPurchases"], 600.0)
+        self.assertEqual(dashboard["stats"]["bankBalance"], 500.0)
+        self.assertEqual(dashboard["stats"]["expenseTotal"], 75.0)
+
+        transaction_numbers = {row["txnNo"] for row in response.data["transactions"]}
+        self.assertTrue({
+            "INV-LIVE-001",
+            "PUR-LIVE-001",
+            "PMTIN-LIVE-001",
+            "PMTOUT-LIVE-001",
+            "EXP-LIVE-001",
+        }.issubset(transaction_numbers))
+        self.assertNotIn("INV-OTHER-001", transaction_numbers)
+        self.assertNotIn("INV-CANCELLED-001", transaction_numbers)
+        self.assertNotIn("PMTIN-VOID-001", transaction_numbers)
+        self.assertNotIn("PMTOUT-VOID-001", transaction_numbers)
+        invoice_statuses = {row["invoiceNumber"]: row["status"] for row in response.data["invoices"]}
+        self.assertEqual(invoice_statuses["INV-CANCELLED-001"], "cancelled")
+
+    def test_role_permissions_block_non_admin_user_management(self):
+        business = Business.objects.create(name="Role Tenant", phone="9000000031")
+        admin = self.make_user(business, "9000000032", "admin", "Admin")
+        salesman = self.make_user(business, "9000000033", "salesman", "Sales")
+        partner = self.make_user(business, "9000000036", "partner", "Partner")
+        target = self.make_user(business, "9000000037", "stock_manager", "Target")
+
+        self.auth_as(salesman)
+        blocked_response = self.client.post("/api/v1/auth/users/", {
+            "first_name": "Blocked",
+            "mobile": "9000000034",
+            "role": "salesman",
+        }, format="json")
+        self.assertEqual(blocked_response.status_code, status.HTTP_403_FORBIDDEN)
+        blocked_delete = self.client.delete(f"/api/v1/auth/users/{target.id}/")
+        self.assertEqual(blocked_delete.status_code, status.HTTP_403_FORBIDDEN)
+        target.refresh_from_db()
+        self.assertTrue(target.is_active)
+
+        self.auth_as(partner)
+        blocked_list = self.client.get("/api/v1/auth/users/")
+        self.assertEqual(blocked_list.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.auth_as(admin)
+        allowed_response = self.client.post("/api/v1/auth/users/", {
+            "first_name": "Allowed",
+            "mobile": "9000000035",
+            "role": "stock_manager",
+        }, format="json")
+        self.assertEqual(allowed_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(business=business, mobile="9000000035").exists())
+        allowed_delete = self.client.delete(f"/api/v1/auth/users/{target.id}/")
+        self.assertEqual(allowed_delete.status_code, status.HTTP_200_OK)
+        target.refresh_from_db()
+        self.assertFalse(target.is_active)
+
+    def test_deleted_user_token_cannot_access_workspace(self):
+        business = Business.objects.create(name="Deleted Tenant", phone="9000000041")
+        admin = self.make_user(business, "9000000042", "admin", "Admin")
+        deleted_user = self.make_user(business, "9000000043", "salesman", "Deleted User")
+        deleted_user_token = RefreshToken.for_user(deleted_user).access_token
+
+        self.auth_as(admin)
+        delete_response = self.client.delete(f"/api/v1/auth/users/{deleted_user.id}/")
+        self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {deleted_user_token}")
+        response = self.client.get("/api/v1/auth/workspace")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_profile_update_cannot_change_role_active_state_or_business(self):
+        business_a = Business.objects.create(name="Tenant Profile A", phone="9000000051")
+        business_b = Business.objects.create(name="Tenant Profile B", phone="9000000052")
+        salesman = self.make_user(business_a, "9000000053", "salesman", "Sales")
+
+        self.auth_as(salesman)
+        response = self.client.patch("/api/v1/auth/profile", {
+            "first_name": "Renamed",
+            "role": "admin",
+            "business": str(business_b.id),
+            "is_active": False,
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        salesman.refresh_from_db()
+        self.assertEqual(salesman.first_name, "Renamed")
+        self.assertEqual(salesman.role, "salesman")
+        self.assertEqual(salesman.business, business_a)
+        self.assertTrue(salesman.is_active)
+
+    def test_role_module_denials_are_blocked_and_audited(self):
+        business = Business.objects.create(name="Audit Tenant", phone="9000000061")
+        stock_manager = self.make_user(business, "9000000062", "stock_manager", "Stock")
+        salesman = self.make_user(business, "9000000063", "salesman", "Sales")
+
+        self.auth_as(stock_manager)
+        sales_response = self.client.get("/api/v1/sales/invoices/")
+        self.assertEqual(sales_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.auth_as(salesman)
+        audit_response = self.client.get("/api/v1/auth/activity")
+        self.assertEqual(audit_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        denied_modules = {
+            (log.details or {}).get("module")
+            for log in ActivityLog.objects.filter(business=business, action="access_denied")
+        }
+        self.assertIn("sales", denied_modules)
+        self.assertIn("audit", denied_modules)
