@@ -1,0 +1,81 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Django checks and tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: csm_silks
+          POSTGRES_USER: csm_user
+          POSTGRES_PASSWORD: csm_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U csm_user -d csm_silks"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SECRET_KEY: ci-secret-key
+      DEBUG: 'True'
+      DB_NAME: csm_silks
+      DB_USER: csm_user
+      DB_PASSWORD: csm_password
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      E_INVOICE_PROVIDER: disabled
+      SMS_PROVIDER: disabled
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: Verify migration files are current
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Apply migrations
+        run: python manage.py migrate --noinput
+
+      - name: Run tests
+        run: >
+          python manage.py test
+          apps.accounts
+          apps.accounting
+          apps.payments
+          apps.sales
+          apps.purchases
+          apps.staff
+          apps.business_settings
+          apps.business_tools
+          apps.items
+          apps.parties
+          --noinput

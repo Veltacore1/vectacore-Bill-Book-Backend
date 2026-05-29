@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+db.sqlite3
+*.sqlite3
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+media/
+staticfiles/

@@ -11,3 +11,4 @@ weasyprint
 python-barcode
 python-dateutil
 qrcode
+gunicorn
