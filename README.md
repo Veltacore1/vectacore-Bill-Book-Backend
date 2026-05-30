@@ -14,6 +14,14 @@ The backend is Postgres-first. Configure database and provider settings through 
 
 Copy `.env.example` to `.env` for local/prod configuration, then replace every `change-this-*` value before deployment.
 
+Health checks are exposed at:
+
+```bash
+curl http://127.0.0.1:8001/healthz
+```
+
+The endpoint verifies Django can reach the configured database and is intentionally public for Docker/load balancer health probes.
+
 ## Production Auth/SMS
 
 OTP login is tenant-safe and provider-backed. In production set:
@@ -45,3 +53,5 @@ The backend image expects environment variables for database credentials and pro
 ```bash
 python manage.py migrate --noinput
 ```
+
+A production Docker Compose bundle, health checks, and Postgres backup/restore scripts live in `deploy/`. See `deploy/README.md` for the runbook.

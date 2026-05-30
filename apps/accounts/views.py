@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import status, views, viewsets, permissions
@@ -229,6 +229,34 @@ def _activity_feed(business, limit=40):
 
     rows.sort(key=lambda row: row["at"] or timezone.now(), reverse=True)
     return [{key: value for key, value in row.items() if key != "at"} for row in rows[:limit]]
+
+
+class HealthCheckView(views.APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        except Exception:
+            return Response(
+                {
+                    "success": False,
+                    "status": "unhealthy",
+                    "app": "VastraBook",
+                    "database": "unavailable",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response({
+            "success": True,
+            "status": "ok",
+            "app": "VastraBook",
+            "database": "ok",
+        })
 
 
 class TextileTenantRegistrationView(views.APIView):

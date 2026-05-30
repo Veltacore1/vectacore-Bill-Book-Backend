@@ -30,6 +30,21 @@ class TenantOnboardingPermissionTests(APITestCase):
             is_active=True,
         )
 
+    def test_healthz_is_public_and_checks_database(self):
+        response = self.client.get("/healthz")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["success"], True)
+        self.assertEqual(response.data["status"], "ok")
+        self.assertEqual(response.data["database"], "ok")
+
+    @override_settings(DEBUG=False, SECURE_SSL_REDIRECT=True, SECURE_REDIRECT_EXEMPT=[r"^healthz$"])
+    def test_healthz_stays_available_for_internal_http_health_checks(self):
+        response = self.client.get("/healthz", secure=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "ok")
+
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_login_uses_random_hashed_code_for_existing_tenant_user(self):
         business = Business.objects.create(name="OTP Tenant", phone="9000000091")
