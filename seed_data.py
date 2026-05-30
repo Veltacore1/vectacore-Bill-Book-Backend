@@ -637,7 +637,7 @@ def seed_staff_and_settings(business, parties):
             "plan_name": "Platinum Plan",
             "plan_valid_till": date(2026, 5, 20),
             "referral_code": "CSM2026",
-            "support_email": "support@mybillbook.in",
+            "support_email": "support@vastrabook.in",
             "support_phone": "8608633066",
         },
     )

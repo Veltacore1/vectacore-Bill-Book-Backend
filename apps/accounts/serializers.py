@@ -1,7 +1,14 @@
 import re
 
 from rest_framework import serializers
-from .models import Business, User, OTPToken, ActivityLog
+from .models import Business, User, ActivityLog
+
+
+def normalize_mobile(value):
+    cleaned = (value or "").strip().replace(" ", "").replace("-", "")
+    if not re.fullmatch(r"\+?\d{10,15}", cleaned):
+        raise serializers.ValidationError("Enter a valid mobile number.")
+    return cleaned
 
 class BusinessSerializer(serializers.ModelSerializer):
     class Meta:
@@ -23,9 +30,21 @@ class UserSerializer(serializers.ModelSerializer):
 class SendOTPSerializer(serializers.Serializer):
     mobile = serializers.CharField(max_length=20)
 
+    def validate_mobile(self, value):
+        return normalize_mobile(value)
+
 class VerifyOTPSerializer(serializers.Serializer):
     mobile = serializers.CharField(max_length=20)
     otp = serializers.CharField(max_length=6)
+
+    def validate_mobile(self, value):
+        return normalize_mobile(value)
+
+    def validate_otp(self, value):
+        cleaned = (value or "").strip()
+        if not re.fullmatch(r"\d{6}", cleaned):
+            raise serializers.ValidationError("Enter the 6 digit OTP.")
+        return cleaned
 
 class AddUserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -74,9 +93,7 @@ class TextileTenantRegistrationSerializer(serializers.Serializer):
         return cleaned
 
     def validate_mobile(self, value):
-        value = value.strip().replace(" ", "").replace("-", "")
-        if not re.fullmatch(r"\+?\d{10,15}", value):
-            raise serializers.ValidationError("Enter a valid mobile number.")
+        value = normalize_mobile(value)
         existing = User.objects.filter(mobile=value).select_related("business").first()
         if existing and existing.business_id:
             raise serializers.ValidationError("This mobile number is already linked to a tenant.")

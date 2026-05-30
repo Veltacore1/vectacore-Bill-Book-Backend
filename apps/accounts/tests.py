@@ -1,9 +1,14 @@
+from unittest import mock
+
+from django.core.checks import Tags, run_checks
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounting.models import BankAccount, Expense
-from apps.accounts.models import ActivityLog, Business, User
+from apps.accounts.models import ActivityLog, Business, OTPToken, User
+from apps.accounts.otp import otp_matches
 from apps.items.models import Item
 from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentOut
@@ -24,6 +29,121 @@ class TenantOnboardingPermissionTests(APITestCase):
             first_name=name,
             is_active=True,
         )
+
+    @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
+    def test_otp_login_uses_random_hashed_code_for_existing_tenant_user(self):
+        business = Business.objects.create(name="OTP Tenant", phone="9000000091")
+        self.make_user(business, "9000000092", "admin", "OTP Admin")
+
+        send_response = self.client.post("/api/v1/auth/send-otp", {
+            "mobile": "9000000092",
+        }, format="json")
+
+        self.assertEqual(send_response.status_code, status.HTTP_200_OK)
+        raw_otp = send_response.data["otp_simulated"]
+        self.assertRegex(raw_otp, r"^\d{6}$")
+        self.assertNotEqual(raw_otp, "123456")
+        token = OTPToken.objects.get(mobile="9000000092")
+        self.assertNotEqual(token.otp, raw_otp)
+        self.assertTrue(otp_matches("9000000092", raw_otp, token.otp))
+
+        verify_response = self.client.post("/api/v1/auth/verify-otp", {
+            "mobile": "9000000092",
+            "otp": raw_otp,
+        }, format="json")
+
+        self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(verify_response.data["user"]["mobile"], "9000000092")
+        self.assertIn("access", verify_response.data["tokens"])
+        token.refresh_from_db()
+        self.assertTrue(token.used)
+
+    @override_settings(DEBUG=False, SMS_PROVIDER="disabled")
+    def test_otp_send_requires_real_sms_provider_for_registered_user(self):
+        business = Business.objects.create(name="No SMS Tenant", phone="9000000093")
+        self.make_user(business, "9000000094", "admin", "No SMS Admin")
+
+        response = self.client.post("/api/v1/auth/send-otp", {
+            "mobile": "9000000094",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(OTPToken.objects.filter(mobile="9000000094").count(), 0)
+        self.assertNotIn("otp_simulated", response.data)
+
+    @override_settings(
+        DEBUG=False,
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+    )
+    def test_otp_send_uses_configured_sms_provider_without_leaking_code(self):
+        business = Business.objects.create(name="Real SMS Tenant", phone="9000000095")
+        self.make_user(business, "9000000096", "admin", "Real SMS Admin")
+        provider_response = mock.MagicMock()
+        provider_response.status = 202
+        provider_response.__enter__.return_value = provider_response
+
+        with mock.patch("apps.accounts.otp.urlopen", return_value=provider_response) as provider_call:
+            response = self.client.post("/api/v1/auth/send-otp", {
+                "mobile": "9000000096",
+            }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["provider"], "sms_gateway")
+        self.assertNotIn("otp_simulated", response.data)
+        self.assertEqual(OTPToken.objects.filter(mobile="9000000096").count(), 1)
+        self.assertTrue(provider_call.called)
+
+    @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
+    def test_otp_send_does_not_create_user_or_token_for_unknown_mobile(self):
+        response = self.client.post("/api/v1/auth/send-otp", {
+            "mobile": "9000000097",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(OTPToken.objects.filter(mobile="9000000097").count(), 0)
+        self.assertFalse(User.objects.filter(mobile="9000000097").exists())
+
+    def test_refresh_token_endpoint_renews_existing_tenant_session(self):
+        business = Business.objects.create(name="Refresh Tenant", phone="9000000098")
+        user = self.make_user(business, "9000000099", "admin", "Refresh Admin")
+        refresh = RefreshToken.for_user(user)
+
+        response = self.client.post("/api/v1/auth/token/refresh", {
+            "refresh": str(refresh),
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        workspace_response = self.client.get("/api/v1/auth/workspace")
+        self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(workspace_response.data["business"]["name"], "Refresh Tenant")
+
+    @override_settings(
+        DEBUG=False,
+        SECRET_KEY="django-insecure-test",
+        ALLOWED_HOSTS=["*"],
+        CORS_ALLOW_ALL_ORIGINS=True,
+        DEMO_SESSION_ENABLED=True,
+        SMS_PROVIDER="local_stub",
+        E_INVOICE_PROVIDER="disabled",
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    )
+    def test_production_checks_block_insecure_deploy_defaults(self):
+        messages = run_checks(tags=[Tags.security], include_deployment_checks=True)
+        ids = {message.id for message in messages}
+
+        self.assertTrue({
+            "accounts.E001",
+            "accounts.E002",
+            "accounts.E003",
+            "accounts.E004",
+            "accounts.E005",
+            "accounts.E008",
+        }.issubset(ids))
+        self.assertIn("accounts.W001", ids)
 
     def test_registration_creates_clean_tenant_without_touching_demo_data(self):
         demo_business = Business.objects.create(name="CSM SILKS", phone="8608633066")

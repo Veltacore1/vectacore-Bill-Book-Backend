@@ -81,7 +81,7 @@ class User(AbstractUser):
 class OTPToken(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     mobile = models.CharField(max_length=20)
-    otp = models.CharField(max_length=6)
+    otp = models.CharField(max_length=128)
     expires_at = models.DateTimeField()
     used = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

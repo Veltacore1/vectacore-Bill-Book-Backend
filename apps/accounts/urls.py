@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     SendOTPView,
     VerifyOTPView,
@@ -21,6 +22,7 @@ urlpatterns = [
     path("register", TextileTenantRegistrationView.as_view(), name="tenant_register"),
     path("send-otp", SendOTPView.as_view(), name="send_otp"),
     path("verify-otp", VerifyOTPView.as_view(), name="verify_otp"),
+    path("token/refresh", TokenRefreshView.as_view(), name="token_refresh"),
     path("demo-session", DemoSessionView.as_view(), name="demo_session"),
     path("profile", UserProfileView.as_view(), name="user_profile"),
     path("workspace", TenantWorkspaceView.as_view(), name="tenant_workspace"),

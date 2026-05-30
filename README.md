@@ -1,6 +1,6 @@
-# vectacore-Bill-Book-Backend
+# VastraBook Backend
 
-Django REST backend for the Vectacore Bill Book application.
+Django REST backend for **VastraBook by Veltacore**, a multi-tenant textile billing and inventory application.
 
 ## Local Setup
 
@@ -11,6 +11,21 @@ python manage.py runserver 127.0.0.1:8001
 ```
 
 The backend is Postgres-first. Configure database and provider settings through environment variables, for example `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT`.
+
+Copy `.env.example` to `.env` for local/prod configuration, then replace every `change-this-*` value before deployment.
+
+## Production Auth/SMS
+
+OTP login is tenant-safe and provider-backed. In production set:
+
+```bash
+DEBUG=False
+SMS_PROVIDER=your_provider_name
+SMS_PROVIDER_API_URL=https://provider.example/send
+SMS_PROVIDER_API_TOKEN=...
+```
+
+When `DEBUG=False`, the local SMS stub is rejected and OTP codes are never returned in API responses. OTPs are stored as HMAC digests, expire after 10 minutes, and only existing active tenant users can receive or verify login codes.
 
 ## CI/CD
 

@@ -1,4 +1,3 @@
-import random
 from datetime import datetime, timedelta
 from decimal import Decimal
 from django.conf import settings
@@ -10,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Business, User, OTPToken, ActivityLog
+from .otp import OTP_TTL_MINUTES, dispatch_login_otp, generate_login_otp, otp_digest, otp_matches
 from .permissions import RoleModulePermission, role_permissions_for
 from .serializers import (
     BusinessSerializer, UserSerializer, SendOTPSerializer, 
@@ -314,28 +314,55 @@ class SendOTPView(views.APIView):
         serializer = SendOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         mobile = serializer.validated_data["mobile"]
-        
-        # In a real setup, generate and send SMS. For development, we use static OTP: "123456"
-        otp = "123456"
-        expires_at = timezone.now() + timedelta(minutes=10)
-        
-        OTPToken.objects.create(
+
+        user = User.objects.select_related("business").filter(
             mobile=mobile,
-            otp=otp,
-            expires_at=expires_at
-        )
-        
-        # Log to terminal (simulating SMS API trigger)
-        print(f"--- SMS GATEWAY SIMULATION ---")
-        print(f"To: {mobile}")
-        print(f"Message: Your CSM SILKS Login OTP is {otp}. Valid for 10 minutes.")
-        print(f"------------------------------")
-        
-        return Response({
+            is_active=True,
+            business__isnull=False,
+        ).first()
+        if not user:
+            return Response({
+                "success": True,
+                "message": "If this mobile is registered, an OTP has been sent.",
+            })
+
+        recent_cutoff = timezone.now() - timedelta(minutes=10)
+        recent_count = OTPToken.objects.filter(
+            mobile=mobile,
+            created_at__gte=recent_cutoff,
+        ).count()
+        if recent_count >= 5:
+            return Response(
+                {"success": False, "message": "Too many OTP requests. Try again after 10 minutes."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        otp = generate_login_otp()
+        delivered, provider, delivery_message = dispatch_login_otp(mobile, otp)
+        if not delivered:
+            return Response(
+                {"success": False, "message": delivery_message, "provider": provider},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        expires_at = timezone.now() + timedelta(minutes=OTP_TTL_MINUTES)
+        with transaction.atomic():
+            OTPToken.objects.filter(mobile=mobile, used=False).update(used=True)
+            OTPToken.objects.create(
+                mobile=mobile,
+                otp=otp_digest(mobile, otp),
+                expires_at=expires_at,
+            )
+
+        response = {
             "success": True,
-            "message": "OTP sent successfully (Simulated: 123456)",
-            "otp_simulated": otp
-        })
+            "message": "OTP sent successfully",
+            "provider": provider,
+            "expiresInMinutes": OTP_TTL_MINUTES,
+        }
+        if settings.DEBUG and provider in {"local_stub", "demo", "stub"}:
+            response["otp_simulated"] = otp
+        return Response(response)
 
 class VerifyOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
@@ -345,37 +372,38 @@ class VerifyOTPView(views.APIView):
         serializer.is_valid(raise_exception=True)
         mobile = serializer.validated_data["mobile"]
         otp = serializer.validated_data["otp"]
-        
-        # Verify active OTP token
-        token = OTPToken.objects.filter(
+
+        user = User.objects.select_related("business").filter(
             mobile=mobile,
-            otp=otp,
+            is_active=True,
+            business__isnull=False,
+        ).first()
+        if not user:
+            return Response(
+                {"success": False, "message": "No active tenant user found for this mobile."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        tokens = list(OTPToken.objects.filter(
+            mobile=mobile,
             expires_at__gt=timezone.now(),
-            used=False
-        ).order_by("-created_at").first()
-        
+            used=False,
+        ).order_by("-created_at")[:5])
+        token = next((candidate for candidate in tokens if otp_matches(mobile, otp, candidate.otp)), None)
+
         if not token:
             return Response(
                 {"success": False, "message": "Invalid or expired OTP"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         token.used = True
-        token.save()
-        
-        # Get or create User
-        user, created = User.objects.get_or_create(mobile=mobile, defaults={
-            "username": mobile,
-            "is_active": True,
-            "role": "admin"  # Default role for creator
-        })
-        
+        token.save(update_fields=["used"])
+
         user.last_login_at = timezone.now()
-        user.save()
-        
-        # Generate JWT Tokens
+        user.save(update_fields=["last_login_at"])
+
         refresh = RefreshToken.for_user(user)
-        
         return Response({
             "success": True,
             "user": UserSerializer(user).data,
