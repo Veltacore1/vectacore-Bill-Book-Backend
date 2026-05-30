@@ -3,9 +3,10 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
 from django.utils import timezone
-from .models import PurchaseInvoice, PurchaseOrder, DebitNote
+from .models import PurchaseInvoice, PurchaseOrder, PurchaseReturn, DebitNote
 from .serializers import (
-    PurchaseInvoiceSerializer, PurchaseOrderSerializer, DebitNoteSerializer
+    PurchaseInvoiceSerializer, PurchaseOrderSerializer, PurchaseReturnSerializer,
+    DebitNoteSerializer
 )
 from apps.accounts.activity import write_activity
 from apps.items.models import Item, apply_stock_movement
@@ -219,6 +220,95 @@ class PurchaseOrderViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
             "message": "Purchase order successfully converted to purchase invoice",
             "invoice": PurchaseInvoiceSerializer(invoice).data
         })
+
+
+class PurchaseReturnViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
+    serializer_class = PurchaseReturnSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if not self.request.business:
+            return PurchaseReturn.objects.none()
+
+        queryset = PurchaseReturn.objects.filter(business=self.request.business)
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        party = self.request.query_params.get("party")
+        if party:
+            queryset = queryset.filter(party_id=party)
+        return queryset.select_related("party", "original_invoice").prefetch_related("line_items").order_by("-return_date", "-created_at")
+
+    def perform_create(self, serializer):
+        purchase_return = serializer.save()
+        _write_purchase_activity(
+            self.request,
+            "purchase_return_created",
+            "purchase_return",
+            purchase_return.id,
+            _voucher_details(purchase_return, "return_number", stockAdjusted=True),
+        )
+
+    def perform_update(self, serializer):
+        purchase_return = serializer.save()
+        _write_purchase_activity(
+            self.request,
+            "purchase_return_updated",
+            "purchase_return",
+            purchase_return.id,
+            _voucher_details(purchase_return, "return_number", stockReapplied=True),
+        )
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        purchase_return_ref = self.get_object()
+
+        with transaction.atomic():
+            purchase_return = (
+                PurchaseReturn.objects.select_for_update()
+                .prefetch_related("line_items")
+                .get(id=purchase_return_ref.id, business=request.business)
+            )
+            if purchase_return.status == "cancelled":
+                return Response(
+                    {"success": False, "message": "Purchase return is already cancelled"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            for line_item in purchase_return.line_items.all():
+                if not line_item.item:
+                    continue
+                actual_item = Item.objects.select_for_update().get(id=line_item.item.id, business=request.business)
+                apply_stock_movement(
+                    business=request.business,
+                    item=actual_item,
+                    godown=actual_item.godown,
+                    movement_type="purchase",
+                    reference_type="purchase_return_cancel",
+                    reference_id=purchase_return.id,
+                    quantity=line_item.quantity,
+                    rate=line_item.rate,
+                    created_by=request.user,
+                    notes=f"Restored via Purchase Return Cancellation {purchase_return.return_number}",
+                )
+
+            purchase_return.status = "cancelled"
+            purchase_return.reason = request.data.get("reason") or purchase_return.reason
+            purchase_return.save(update_fields=["status", "reason", "updated_at"])
+            _write_purchase_activity(
+                request,
+                "purchase_return_cancelled",
+                "purchase_return",
+                purchase_return.id,
+                _voucher_details(purchase_return, "return_number", stockRestored=True),
+            )
+
+        return Response({
+            "success": True,
+            "message": "Purchase return cancelled and stock restored successfully",
+            "purchase_return": PurchaseReturnSerializer(purchase_return, context={"request": request}).data,
+        })
+
 
 class DebitNoteViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
     serializer_class = DebitNoteSerializer

@@ -509,7 +509,7 @@ class TenantWorkspaceView(views.APIView):
         from apps.parties.serializers import PartySerializer
         from apps.items.models import Godown, Item, ItemGodownStock
         from apps.sales.models import CreditNote, DeliveryChallan, ProformaInvoice, Quotation, SalesInvoice, SalesReturn
-        from apps.purchases.models import DebitNote, PurchaseInvoice, PurchaseOrder
+        from apps.purchases.models import DebitNote, PurchaseInvoice, PurchaseOrder, PurchaseReturn
         from apps.payments.models import PaymentIn, PaymentOut
         from apps.staff.models import Staff, Attendance
         from apps.accounting.models import AutomatedBill, BankAccount, BankTransaction, Expense
@@ -926,20 +926,40 @@ class TenantWorkspaceView(views.APIView):
             ],
         }
 
+        def _purchase_return_row(row):
+            first_line = row.line_items.first()
+            return {
+                "id": str(row.id),
+                "date": _date(row.return_date),
+                "number": row.return_number,
+                "partyName": row.party.name.upper(),
+                "dueIn": "-",
+                "itemName": first_line.item_name if first_line else "Purchase Return",
+                "qty": _num(first_line.quantity) if first_line else 1,
+                "amount": _num(row.total_amount),
+                "paidAmount": 0,
+                "settledAmount": 0,
+                "paymentMode": "-",
+                "linkedVoucher": row.original_invoice.invoice_number if row.original_invoice else row.reference_number or "-",
+                "expectedDate": "-",
+                "status": row.get_status_display(),
+                "notes": row.reason or "",
+            }
+
         debit_notes = list(
             DebitNote.objects.filter(business=business)
             .select_related("party", "original_invoice")
             .order_by("-note_date", "-created_at")
         )
 
-        def _debit_row(note, is_return=False):
+        def _debit_row(note):
             return {
                 "id": str(note.id),
                 "date": _date(note.note_date),
                 "number": note.debit_note_number,
                 "partyName": note.party.name.upper(),
                 "dueIn": "-",
-                "itemName": "Purchase Return" if is_return else "Debit Note",
+                "itemName": "Debit Note",
                 "qty": 1,
                 "amount": _num(note.total_amount),
                 "paidAmount": 0,
@@ -947,13 +967,10 @@ class TenantWorkspaceView(views.APIView):
                 "paymentMode": "-",
                 "linkedVoucher": note.original_invoice.invoice_number if note.original_invoice else "-",
                 "expectedDate": "-",
-                "status": "Pending Adjustment" if is_return else note.status.title(),
+                "status": note.status.title(),
                 "notes": note.reason or "",
             }
 
-        purchase_return_notes = [
-            note for note in debit_notes if (note.reason or "").lower().startswith("purchase return:")
-        ]
         debit_note_rows = [
             note for note in debit_notes if not (note.reason or "").lower().startswith("purchase return:")
         ]
@@ -1002,7 +1019,13 @@ class TenantWorkspaceView(views.APIView):
                 }
                 for payment in PaymentOut.objects.filter(business=business).select_related("party").order_by("-payment_date", "-created_at")
             ],
-            "purchase-return": [_debit_row(note, is_return=True) for note in purchase_return_notes],
+            "purchase-return": [
+                _purchase_return_row(row)
+                for row in PurchaseReturn.objects.filter(business=business)
+                .select_related("party", "original_invoice")
+                .prefetch_related("line_items")
+                .order_by("-return_date", "-created_at")
+            ],
             "debit-note": [_debit_row(note) for note in debit_note_rows],
             "purchase-orders": [
                 {

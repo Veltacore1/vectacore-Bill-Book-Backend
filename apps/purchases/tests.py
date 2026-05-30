@@ -8,7 +8,7 @@ from apps.accounts.models import ActivityLog, Business, User
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 from apps.payments.models import PaymentOut
-from apps.purchases.models import PurchaseInvoice, PurchaseOrder
+from apps.purchases.models import PurchaseInvoice, PurchaseOrder, PurchaseReturn
 
 
 class PurchaseLifecycleAuditTests(APITestCase):
@@ -174,3 +174,99 @@ class PurchaseLifecycleAuditTests(APITestCase):
                 entity_id=debit_response.data["id"],
             ).exists()
         )
+
+    def test_purchase_return_is_real_voucher_with_stock_cancel_and_workspace_row(self):
+        create_response = self.client.post("/api/v1/purchases/returns/", {
+            "party": str(self.supplier.id),
+            "reference_number": "SUP-100",
+            "total_amount": "900.00",
+            "reason": "Damaged saree returned to supplier",
+            "line_items": [{
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "1.000",
+                "rate": "900.00",
+                "gst_rate": "0.00",
+                "taxable_amount": "900.00",
+                "amount": "900.00",
+                "sort_order": 0,
+            }],
+        }, format="json")
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(create_response.data["return_number"].startswith("PR/"))
+
+        purchase_return = PurchaseReturn.objects.get(id=create_response.data["id"], business=self.business)
+        self.item.refresh_from_db()
+        stock = ItemGodownStock.objects.get(business=self.business, item=self.item, godown=self.godown)
+
+        self.assertEqual(purchase_return.status, "adjusted")
+        self.assertEqual(str(self.item.current_stock), "9.000")
+        self.assertEqual(str(stock.current_stock), "9.000")
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                business=self.business,
+                action="purchase_return_created",
+                entity_id=purchase_return.id,
+            ).exists()
+        )
+
+        workspace_response = self.client.get("/api/v1/auth/workspace")
+        self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
+        return_rows = workspace_response.data["purchaseRows"]["purchase-return"]
+        self.assertEqual(return_rows[0]["number"], purchase_return.return_number)
+        self.assertEqual(return_rows[0]["linkedVoucher"], "SUP-100")
+        self.assertEqual(return_rows[0]["status"], "Adjusted")
+
+        cancel_response = self.client.post(
+            f"/api/v1/purchases/returns/{purchase_return.id}/cancel/",
+            {"reason": "Supplier rejected return"},
+            format="json",
+        )
+
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        purchase_return.refresh_from_db()
+        self.item.refresh_from_db()
+        stock.refresh_from_db()
+        self.assertEqual(purchase_return.status, "cancelled")
+        self.assertEqual(str(self.item.current_stock), "10.000")
+        self.assertEqual(str(stock.current_stock), "10.000")
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                business=self.business,
+                action="purchase_return_cancelled",
+                entity_id=purchase_return.id,
+            ).exists()
+        )
+
+    def test_purchase_return_rejects_cross_tenant_item_without_stock_change(self):
+        other_business = Business.objects.create(name="Other Purchase Return Tenant", phone="9100000801", invoice_prefix="OPR")
+        other_item = Item.objects.create(
+            business=other_business,
+            name="Other Supplier Saree",
+            selling_price=1500,
+            purchase_price=900,
+            gst_rate=0,
+            current_stock=Decimal("5.000"),
+        )
+
+        response = self.client.post("/api/v1/purchases/returns/", {
+            "party": str(self.supplier.id),
+            "total_amount": "900.00",
+            "line_items": [{
+                "item": str(other_item.id),
+                "item_name": other_item.name,
+                "quantity": "1.000",
+                "rate": "900.00",
+                "gst_rate": "0.00",
+                "taxable_amount": "900.00",
+                "amount": "900.00",
+            }],
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        other_item.refresh_from_db()
+        self.assertEqual(str(self.item.current_stock), "10.000")
+        self.assertEqual(str(other_item.current_stock), "5.000")
+        self.assertEqual(PurchaseReturn.objects.filter(business=self.business).count(), 0)
