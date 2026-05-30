@@ -35,6 +35,19 @@ SMS_PROVIDER_API_TOKEN=...
 
 When `DEBUG=False`, the local SMS stub is rejected and OTP codes are never returned in API responses. OTPs are stored as HMAC digests, expire after 10 minutes, and only existing active tenant users can receive or verify login codes.
 
+## Email Delivery
+
+Report sharing and CA report bundles can send real read-only report links through Resend. Configure the provider through environment variables only:
+
+```bash
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=...
+RESEND_FROM_EMAIL=reports@your-domain.example
+EMAIL_REPLY_TO=owner@your-domain.example
+```
+
+Local development defaults to the `local_stub` provider. In production, Django deployment checks warn when email delivery is not connected, and fail if Resend is selected without the required key/from address.
+
 ## CI/CD
 
 GitHub Actions are included:

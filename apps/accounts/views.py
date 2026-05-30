@@ -61,6 +61,14 @@ def _external_provider_payload():
     return {
         "eInvoice": status_for(settings.E_INVOICE_PROVIDER, settings.E_INVOICE_API_URL, settings.E_INVOICE_API_TOKEN),
         "sms": status_for(settings.SMS_PROVIDER, settings.SMS_PROVIDER_API_URL, settings.SMS_PROVIDER_API_TOKEN),
+        "email": {
+            "provider": settings.EMAIL_PROVIDER,
+            "mode": "development" if settings.EMAIL_PROVIDER in {"local_stub", "demo", "stub"} else ("disabled" if settings.EMAIL_PROVIDER in {"disabled", ""} else "production"),
+            "configured": bool(
+                settings.EMAIL_PROVIDER in {"local_stub", "demo", "stub"}
+                or (settings.EMAIL_PROVIDER == "resend" and settings.RESEND_API_KEY and settings.RESEND_FROM_EMAIL)
+            ),
+        },
     }
 
 

@@ -7,6 +7,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounting.models import BankAccount, Expense
+from apps.accounts.email_delivery import send_email
 from apps.accounts.models import ActivityLog, Business, OTPToken, User
 from apps.accounts.otp import otp_matches
 from apps.items.models import Item
@@ -110,6 +111,34 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(OTPToken.objects.filter(mobile="9000000096").count(), 1)
         self.assertTrue(provider_call.called)
 
+    @override_settings(
+        DEBUG=False,
+        EMAIL_PROVIDER="resend",
+        RESEND_API_URL="https://api.resend.test/emails",
+        RESEND_API_KEY="test-resend-token",
+        RESEND_FROM_EMAIL="reports@example.com",
+    )
+    def test_email_delivery_uses_resend_without_hardcoding_secret(self):
+        provider_response = mock.MagicMock()
+        provider_response.status = 202
+        provider_response.read.return_value = b'{"id":"email_test_123"}'
+        provider_response.__enter__.return_value = provider_response
+
+        with mock.patch("apps.accounts.email_delivery.urlopen", return_value=provider_response) as provider_call:
+            result = send_email(
+                to="ca@example.com",
+                subject="Report ready",
+                html="<p>Report ready</p>",
+                text="Report ready",
+            )
+
+        self.assertTrue(result.delivered)
+        self.assertEqual(result.provider, "resend")
+        self.assertEqual(result.provider_response["id"], "email_test_123")
+        request = provider_call.call_args.args[0]
+        self.assertIn("Bearer test-resend-token", request.headers.get("Authorization"))
+        self.assertNotIn("test-resend-token", result.message)
+
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_send_does_not_create_user_or_token_for_unknown_mobile(self):
         response = self.client.post("/api/v1/auth/send-otp", {
@@ -159,6 +188,7 @@ class TenantOnboardingPermissionTests(APITestCase):
             "accounts.E008",
         }.issubset(ids))
         self.assertIn("accounts.W001", ids)
+        self.assertIn("accounts.W002", ids)
 
     def test_registration_creates_clean_tenant_without_touching_demo_data(self):
         demo_business = Business.objects.create(name="CSM SILKS", phone="8608633066")

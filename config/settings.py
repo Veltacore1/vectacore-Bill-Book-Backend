@@ -165,6 +165,11 @@ E_INVOICE_API_TOKEN = os.getenv("E_INVOICE_API_TOKEN", "").strip()
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "local_stub" if DEBUG else "disabled").strip().lower()
 SMS_PROVIDER_API_URL = os.getenv("SMS_PROVIDER_API_URL", "").strip()
 SMS_PROVIDER_API_TOKEN = os.getenv("SMS_PROVIDER_API_TOKEN", "").strip()
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "local_stub" if DEBUG else "disabled").strip().lower()
+RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails").strip()
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev" if DEBUG else "").strip()
+EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", "").strip()
 
 # JWT settings
 SIMPLE_JWT = {

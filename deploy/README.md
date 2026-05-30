@@ -20,6 +20,9 @@ SECURE_SSL_REDIRECT=True
 SESSION_COOKIE_SECURE=True
 CSRF_COOKIE_SECURE=True
 SMS_PROVIDER=<real provider>
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=<real Resend key>
+RESEND_FROM_EMAIL=<verified sender>
 E_INVOICE_PROVIDER=<real provider or disabled>
 ```
 

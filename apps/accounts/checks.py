@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core.checks import Error, Tags, Warning, register
 
+from .email_delivery import LOCAL_EMAIL_PROVIDERS
 from .otp import LOCAL_SMS_PROVIDERS
 
 
@@ -57,6 +58,24 @@ def production_safety_checks(app_configs, **kwargs):
         issues.append(Error(
             "E_INVOICE_API_URL and E_INVOICE_API_TOKEN are required for production e-invoicing.",
             id="accounts.E007",
+        ))
+
+    email_provider = (getattr(settings, "EMAIL_PROVIDER", "disabled") or "disabled").strip().lower()
+    if email_provider in {"disabled", ""} or email_provider in LOCAL_EMAIL_PROVIDERS:
+        issues.append(Warning(
+            "Email delivery is not connected to a production provider.",
+            id="accounts.W002",
+        ))
+    elif email_provider == "resend":
+        if not getattr(settings, "RESEND_API_KEY", "") or not getattr(settings, "RESEND_FROM_EMAIL", ""):
+            issues.append(Error(
+                "RESEND_API_KEY and RESEND_FROM_EMAIL are required for Resend email delivery.",
+                id="accounts.E009",
+            ))
+    else:
+        issues.append(Error(
+            f"EMAIL_PROVIDER '{email_provider}' is not supported.",
+            id="accounts.E010",
         ))
 
     engine = settings.DATABASES.get("default", {}).get("ENGINE", "")

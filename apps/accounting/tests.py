@@ -1,5 +1,8 @@
+import json
+from unittest import mock
 from decimal import Decimal
 
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -223,19 +226,46 @@ class ReportsExportTests(APITestCase):
         invalid_response = self.client.get(f"/api/v1/accounting/reports/?party={self.other_party.id}")
         self.assertEqual(invalid_response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_ca_report_share_is_persisted_for_current_tenant(self):
+    @override_settings(
+        DEBUG=False,
+        EMAIL_PROVIDER="resend",
+        RESEND_API_URL="https://api.resend.test/emails",
+        RESEND_API_KEY="test-resend-token",
+        RESEND_FROM_EMAIL="reports@example.com",
+    )
+    def test_ca_report_share_is_persisted_sent_and_public_link_is_tenant_scoped(self):
         self.auth_as(self.user)
+        provider_response = mock.MagicMock()
+        provider_response.status = 202
+        provider_response.read.return_value = b'{"id":"email_test_report"}'
+        provider_response.__enter__.return_value = provider_response
 
-        response = self.client.post(
-            "/api/v1/accounting/reports/share/?report=sales-register&date_range=This%20Month",
-            {"report": "sales-register", "recipient": "ca@example.com"},
-            format="json",
-        )
+        with mock.patch("apps.accounts.email_delivery.urlopen", return_value=provider_response) as provider_call:
+            response = self.client.post(
+                "/api/v1/accounting/reports/share/?report=sales-register&date_range=This%20Month",
+                {"report": "sales-register", "recipient": "ca@example.com"},
+                format="json",
+            )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["share"]["reportId"], "sales-register")
         self.assertEqual(response.data["share"]["recipient"], "ca@example.com")
+        self.assertEqual(response.data["share"]["status"], "sent")
+        self.assertTrue(response.data["share"]["delivery"]["delivered"])
+        self.assertTrue(provider_call.called)
+        email_payload = json.loads(provider_call.call_args.args[0].data.decode("utf-8"))
+        self.assertIn("/api/v1/accounting/reports/shared/", email_payload["html"])
         share = ReportShare.objects.get(id=response.data["share"]["id"])
         self.assertEqual(share.business, self.business)
         self.assertEqual(share.created_by, self.user)
+        self.assertEqual(share.status, "sent")
+        self.assertTrue(share.filters["emailDelivery"]["delivered"])
         self.assertNotEqual(share.business, self.other_business)
+
+        shared_response = self.client.get(f"/api/v1/accounting/reports/shared/{share.share_token}/")
+        self.assertEqual(shared_response.status_code, status.HTTP_200_OK)
+        self.assertIn("text/html", shared_response["Content-Type"])
+        shared_html = shared_response.content.decode("utf-8")
+        self.assertIn("Sales Register", shared_html)
+        self.assertIn("INV/26-27/0001", shared_html)
+        self.assertNotIn("OTHER/0001", shared_html)

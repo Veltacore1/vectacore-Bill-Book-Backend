@@ -259,6 +259,7 @@ def _serialize_ca_report_share(share):
         "dateRange": share.date_range,
         "status": share.status,
         "shareToken": share.share_token,
+        "delivery": (share.filters or {}).get("emailDelivery", {}),
         "createdAt": timezone.localtime(share.created_at).isoformat(),
         "updatedAt": timezone.localtime(share.updated_at).isoformat(),
     }
@@ -437,7 +438,7 @@ class BusinessPreferenceViewSet(viewsets.ModelViewSet):
                     report_name=report_name,
                     recipient=recipient,
                     date_range=date_range,
-                    filters={"Date Range": date_range, "Access": "CA read only"},
+                    filters={"Date Range": date_range, "Access": "CA read only", "_queryParams": {"date_range": date_range}},
                     status="prepared",
                     created_by=request.user if request.user and request.user.is_authenticated else None,
                 )
@@ -472,9 +473,42 @@ class BusinessPreferenceViewSet(viewsets.ModelViewSet):
                 },
             )
 
+        from apps.accounting.views import _send_report_share_email, _store_share_delivery
+
+        delivery = _send_report_share_email(
+            request,
+            shares,
+            title=f"{business.name} - CA report bundle",
+            intro=f"{business.name} shared read-only accounting reports for your review.",
+        )
+        for share in shares:
+            _store_share_delivery(share, delivery)
+        write_activity(
+            business=business,
+            user=request.user,
+            action="ca_reports_delivery_attempted",
+            entity_type="business_preference",
+            entity_id=preferences.id,
+            details={
+                "recipient": recipient,
+                "provider": delivery.provider,
+                "delivered": delivery.delivered,
+                "status": _serialize_ca_report_share(shares[0])["status"],
+                "reportCount": len(shares),
+            },
+        )
+
+        if delivery.delivered:
+            message = f"{len(shares)} CA report link{' was' if len(shares) == 1 else 's were'} sent to {recipient}"
+        elif delivery.provider == "skipped":
+            message = f"{len(shares)} CA report links prepared from live tenant data"
+        else:
+            message = f"{len(shares)} CA report links prepared, but email delivery failed: {delivery.message}"
+
         return Response({
             "success": True,
-            "message": f"{len(shares)} CA report links prepared from live tenant data",
+            "message": message,
+            "delivery": delivery.as_dict(),
             "data": _ca_report_payload(business, preferences),
             "shares": [_serialize_ca_report_share(share) for share in shares],
         }, status=status.HTTP_201_CREATED)

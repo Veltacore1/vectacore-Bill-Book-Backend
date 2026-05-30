@@ -13,6 +13,8 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from apps.accounts.activity import write_activity
+from apps.accounts.email_delivery import EmailDeliveryResult, is_email_recipient, send_email
 from .models import BankAccount, BankTransaction, Expense, AutomatedBill, ReportShare
 from .serializers import (
     BankAccountSerializer, BankTransactionSerializer, 
@@ -197,6 +199,94 @@ def _report_export_response(report, business, export_format):
     response = HttpResponse(_report_csv(report), content_type="text/csv; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{base_name}.csv"'
     return response
+
+
+def _share_query_params(request):
+    return {
+        key: value
+        for key, value in request.query_params.items()
+        if key not in {"report", "report_id", "export_format", "fmt"}
+    }
+
+
+def _report_share_url(request, share):
+    return request.build_absolute_uri(f"/api/v1/accounting/reports/shared/{share.share_token}/")
+
+
+def _delivery_status_for_share(delivery):
+    if delivery.delivered:
+        return "sent"
+    if delivery.provider == "skipped":
+        return "prepared"
+    return "failed"
+
+
+def _store_share_delivery(share, delivery):
+    filters = dict(share.filters or {})
+    filters["emailDelivery"] = delivery.as_dict()
+    share.status = _delivery_status_for_share(delivery)
+    share.filters = filters
+    share.save(update_fields=["status", "filters", "updated_at"])
+
+
+def _report_share_email_html(business, title, intro, share_rows):
+    links_html = "".join(
+        f"""
+        <tr>
+          <td style="padding:10px;border:1px solid #d8dee9;">{escape(row['name'])}</td>
+          <td style="padding:10px;border:1px solid #d8dee9;">{escape(row['dateRange'] or '-')}</td>
+          <td style="padding:10px;border:1px solid #d8dee9;"><a href="{escape(row['url'])}">Open report</a></td>
+        </tr>
+        """
+        for row in share_rows
+    )
+    return f"""<!doctype html>
+<html>
+<body style="font-family:Arial,Helvetica,sans-serif;color:#111827;line-height:1.5;">
+  <h2 style="margin:0 0 8px;">{escape(title)}</h2>
+  <p style="margin:0 0 16px;">{escape(intro)}</p>
+  <p style="margin:0 0 16px;"><strong>Business:</strong> {escape(business.name)}</p>
+  <table style="border-collapse:collapse;width:100%;max-width:760px;">
+    <thead>
+      <tr>
+        <th style="padding:10px;border:1px solid #d8dee9;text-align:left;background:#f3f5f8;">Report</th>
+        <th style="padding:10px;border:1px solid #d8dee9;text-align:left;background:#f3f5f8;">Date Range</th>
+        <th style="padding:10px;border:1px solid #d8dee9;text-align:left;background:#f3f5f8;">Link</th>
+      </tr>
+    </thead>
+    <tbody>{links_html}</tbody>
+  </table>
+  <p style="margin-top:16px;color:#667085;font-size:12px;">These read-only links can be revoked from VastraBook settings.</p>
+</body>
+</html>"""
+
+
+def _send_report_share_email(request, shares, *, title, intro):
+    shares = list(shares)
+    if not shares:
+        return EmailDeliveryResult(False, "skipped", "No report share links were created.")
+    recipient = shares[0].recipient
+    if not is_email_recipient(recipient):
+        return EmailDeliveryResult(
+            delivered=False,
+            provider="skipped",
+            message="Recipient is not an email address; share links were prepared only.",
+        )
+    share_rows = [
+        {
+            "name": share.report_name,
+            "dateRange": share.date_range,
+            "url": _report_share_url(request, share),
+        }
+        for share in shares
+    ]
+    text = "\n".join(f"{row['name']}: {row['url']}" for row in share_rows)
+    return send_email(
+        to=recipient,
+        subject=title,
+        html=_report_share_email_html(request.business, title, intro, share_rows),
+        text=text,
+    )
 
 
 def _movement_label(value):
@@ -1318,18 +1408,41 @@ class ReportShareView(ReportsView):
             )
 
         filters = report.get("filters") or {}
+        stored_filters = {**filters, "_queryParams": _share_query_params(request)}
         share = ReportShare.objects.create(
             business=request.business,
             report_id=report["id"],
             report_name=report["name"],
             recipient=recipient,
             date_range=filters.get("Date Range", ""),
-            filters=filters,
+            filters=stored_filters,
             created_by=request.user if request.user and request.user.is_authenticated else None,
+        )
+        delivery = _send_report_share_email(
+            request,
+            [share],
+            title=f"{request.business.name} - {report['name']}",
+            intro=f"{request.business.name} shared a read-only report link with you.",
+        )
+        _store_share_delivery(share, delivery)
+        write_activity(
+            business=request.business,
+            user=request.user,
+            action="report_shared",
+            entity_type="report_share",
+            entity_id=share.id,
+            details={
+                "report": share.report_id,
+                "recipient": recipient,
+                "status": share.status,
+                "provider": delivery.provider,
+                "delivered": delivery.delivered,
+            },
         )
         return Response(
             {
                 "success": True,
+                "message": delivery.message,
                 "share": {
                     "id": str(share.id),
                     "reportId": share.report_id,
@@ -1338,10 +1451,53 @@ class ReportShareView(ReportsView):
                     "status": share.status,
                     "shareToken": share.share_token,
                     "createdAt": share.created_at.isoformat(),
+                    "delivery": delivery.as_dict(),
                 },
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class SharedReportView(ReportsView):
+    permission_classes = [permissions.AllowAny]
+
+    class _SharedRequest:
+        def __init__(self, business, query_params):
+            self.business = business
+            self.query_params = query_params
+
+    def get(self, request, share_token):
+        share = (
+            ReportShare.objects.select_related("business")
+            .filter(share_token=share_token)
+            .exclude(status="revoked")
+            .first()
+        )
+        if not share:
+            return Response(
+                {"success": False, "message": "Report share link is invalid or revoked"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        query_params = dict((share.filters or {}).get("_queryParams") or {})
+        if share.date_range and "date_range" not in query_params:
+            query_params["date_range"] = share.date_range
+        shared_request = self._SharedRequest(share.business, query_params)
+        payload, error_response = self._build_payload(shared_request)
+        if error_response:
+            return error_response
+
+        report = next((row for row in payload["reports"] if row["id"] == share.report_id), None)
+        if not report:
+            return Response(
+                {"success": False, "message": "Shared report no longer exists"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        export_format = request.query_params.get("export_format") or request.query_params.get("fmt") or "html"
+        if export_format == "json":
+            return Response({"success": True, "report": report})
+        return _report_export_response(report, share.business, export_format)
 
 
 class BankAccountViewSet(viewsets.ModelViewSet):
