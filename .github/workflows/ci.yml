@@ -87,6 +87,9 @@ jobs:
           X_FRAME_OPTIONS: DENY
         run: python manage.py check --deploy --fail-level WARNING
 
+      - name: Verify deployment smoke checker syntax
+        run: python -m py_compile deploy/smoke_check.py
+
       - name: Verify migration files are current
         run: python manage.py makemigrations --check --dry-run
 

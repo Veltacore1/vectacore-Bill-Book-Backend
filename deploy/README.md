@@ -62,7 +62,28 @@ Expected response:
 }
 ```
 
-## 3. Logs And Operations
+## 3. Run Production Smoke Check
+
+After the stack is healthy, run the deployment smoke checker from the backend repo root:
+
+```powershell
+python .\deploy\smoke_check.py `
+  --backend-url http://127.0.0.1:8001 `
+  --frontend-url http://127.0.0.1:8080
+```
+
+For a seeded demo deployment, also verify that the demo tenant token flow is alive:
+
+```powershell
+python .\deploy\smoke_check.py `
+  --backend-url http://127.0.0.1:8001 `
+  --frontend-url http://127.0.0.1:8080 `
+  --demo-mobile 8608633066
+```
+
+The smoke check verifies backend `/healthz`, database reachability, backend security headers, frontend app shell, frontend CSP/cache/security headers, and immutable asset caching. Use `--skip-frontend-security` only against a local Vite dev server, not a production Nginx deployment.
+
+## 4. Logs And Operations
 
 ```powershell
 docker compose --env-file .env -f deploy/docker-compose.prod.yml logs -f backend
@@ -70,7 +91,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend py
 docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend python manage.py migrate --noinput
 ```
 
-## 4. Backup Postgres
+## 5. Backup Postgres
 
 ```powershell
 .\deploy\backup_postgres.ps1
@@ -78,7 +99,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend py
 
 This creates a compressed `pg_dump` file in `deploy/backups`.
 
-## 5. Restore Postgres
+## 6. Restore Postgres
 
 Restoring replaces existing database objects. Take a fresh backup first.
 
