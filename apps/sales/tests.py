@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -9,7 +11,7 @@ from apps.business_settings.models import BusinessPreference, InvoiceSettings
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentInSettlement
-from apps.sales.models import DeliveryChallan, EInvoiceLog, ProformaInvoice, Quotation, SalesInvoice
+from apps.sales.models import CreditNote, DeliveryChallan, EInvoiceLog, ProformaInvoice, Quotation, SalesInvoice
 
 
 class EInvoiceProviderBoundaryTests(APITestCase):
@@ -469,6 +471,148 @@ class SalesInvoiceLifecycleTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(SalesInvoice.objects.filter(business=self.business).count(), 0)
+
+    def test_sales_return_applies_stock_and_rejects_cross_tenant_references(self):
+        invoice = SalesInvoice.objects.create(
+            business=self.business,
+            invoice_number=f"SAFE/{self._current_fy()}/0100",
+            party=self.party,
+            subtotal=Decimal("1000.00"),
+            taxable_amount=Decimal("1000.00"),
+            total_amount=Decimal("1000.00"),
+            paid_amount=Decimal("1000.00"),
+            status="paid",
+        )
+
+        response = self.client.post("/api/v1/sales/sales-returns/", {
+            "party": str(self.party.id),
+            "original_invoice": str(invoice.id),
+            "total_amount": "1000.00",
+            "reason": "Customer returned one saree",
+            "line_items": [{
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "0.00",
+                "amount": "1000.00",
+            }],
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.item.refresh_from_db()
+        stock = ItemGodownStock.objects.get(business=self.business, item=self.item, godown=self.godown)
+        self.assertEqual(str(self.item.current_stock), "11.000")
+        self.assertEqual(str(stock.current_stock), "11.000")
+
+        other_business = Business.objects.create(name="Other Sales Return Tenant", phone="9100000601", invoice_prefix="OSR")
+        other_party = Party.objects.create(business=other_business, name="Other Customer", party_type="customer")
+        other_item = Item.objects.create(
+            business=other_business,
+            name="Other Silk",
+            selling_price=1000,
+            purchase_price=700,
+            gst_rate=0,
+            current_stock=5,
+        )
+        other_invoice = SalesInvoice.objects.create(
+            business=other_business,
+            invoice_number="OSR/26-27/0001",
+            party=other_party,
+            subtotal=Decimal("1000.00"),
+            taxable_amount=Decimal("1000.00"),
+            total_amount=Decimal("1000.00"),
+            paid_amount=Decimal("0.00"),
+            status="unpaid",
+        )
+
+        invalid_item_response = self.client.post("/api/v1/sales/sales-returns/", {
+            "party": str(self.party.id),
+            "total_amount": "1000.00",
+            "line_items": [{
+                "item": str(other_item.id),
+                "item_name": other_item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "0.00",
+                "amount": "1000.00",
+            }],
+        }, format="json")
+        invalid_party_response = self.client.post("/api/v1/sales/sales-returns/", {
+            "party": str(other_party.id),
+            "total_amount": "1000.00",
+            "line_items": [{
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "0.00",
+                "amount": "1000.00",
+            }],
+        }, format="json")
+        invalid_invoice_response = self.client.post("/api/v1/sales/sales-returns/", {
+            "party": str(self.party.id),
+            "original_invoice": str(other_invoice.id),
+            "total_amount": "1000.00",
+            "line_items": [{
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "0.00",
+                "amount": "1000.00",
+            }],
+        }, format="json")
+
+        self.assertEqual(invalid_item_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_party_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_invoice_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        self.assertEqual(str(self.item.current_stock), "11.000")
+
+    def test_credit_note_rejects_cross_tenant_references_and_cannot_move_business(self):
+        other_business = Business.objects.create(name="Other Credit Tenant", phone="9100000602", invoice_prefix="OCN")
+        other_party = Party.objects.create(business=other_business, name="Other Customer", party_type="customer")
+        other_invoice = SalesInvoice.objects.create(
+            business=other_business,
+            invoice_number="OCN/26-27/0001",
+            party=other_party,
+            subtotal=Decimal("1000.00"),
+            taxable_amount=Decimal("1000.00"),
+            total_amount=Decimal("1000.00"),
+            paid_amount=Decimal("0.00"),
+            status="unpaid",
+        )
+
+        create_response = self.client.post("/api/v1/sales/credit-notes/", {
+            "party": str(self.party.id),
+            "total_amount": "150.00",
+            "reason": "Rate difference",
+        }, format="json")
+        invalid_party_response = self.client.post("/api/v1/sales/credit-notes/", {
+            "party": str(other_party.id),
+            "total_amount": "150.00",
+            "reason": "Wrong tenant party",
+        }, format="json")
+        invalid_invoice_response = self.client.post("/api/v1/sales/credit-notes/", {
+            "party": str(self.party.id),
+            "original_invoice": str(other_invoice.id),
+            "total_amount": "150.00",
+            "reason": "Wrong tenant invoice",
+        }, format="json")
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(invalid_party_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_invoice_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        patch_response = self.client.patch(f"/api/v1/sales/credit-notes/{create_response.data['id']}/", {
+            "business": str(other_business.id),
+            "total_amount": "175.00",
+        }, format="json")
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        credit_note = CreditNote.objects.get(id=create_response.data["id"])
+        self.assertEqual(credit_note.business_id, self.business.id)
+        self.assertEqual(credit_note.total_amount, Decimal("175.00"))
 
 
 class SalesRegisterConversionTests(APITestCase):

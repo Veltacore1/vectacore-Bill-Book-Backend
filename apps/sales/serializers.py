@@ -610,6 +610,43 @@ class SalesReturnSerializer(serializers.ModelSerializer):
 
             return sales_return
 
+    def validate(self, attrs):
+        business = _serializer_business(self)
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        original_invoice = attrs.get("original_invoice") or getattr(self.instance, "original_invoice", None)
+        line_items = attrs.get("line_items")
+
+        if party and business:
+            if party.business_id != business.id or not party.is_active:
+                raise serializers.ValidationError({"party": "Choose an active customer from the active tenant."})
+            if party.party_type not in ["customer", "both"]:
+                raise serializers.ValidationError({"party": "Sales returns can only be linked to customer parties."})
+
+        if original_invoice and business:
+            if original_invoice.business_id != business.id:
+                raise serializers.ValidationError({"original_invoice": "Choose a sales invoice from the active tenant."})
+            if party and original_invoice.party_id != party.id:
+                raise serializers.ValidationError({"original_invoice": "The linked sales invoice must belong to the selected customer."})
+            if original_invoice.status == "cancelled":
+                raise serializers.ValidationError({"original_invoice": "Cancelled sales invoices cannot be returned."})
+
+        if line_items is not None and len(line_items) == 0:
+            raise serializers.ValidationError({"line_items": "Add at least one returned item."})
+
+        for index, line_item in enumerate(line_items or [], start=1):
+            item = line_item.get("item")
+            quantity = Decimal(str(line_item.get("quantity") or 0))
+            if item and business and (item.business_id != business.id or not item.is_active):
+                raise serializers.ValidationError({"line_items": f"Line {index}: choose an active item from the active tenant."})
+            if quantity <= 0:
+                raise serializers.ValidationError({"line_items": f"Line {index}: returned quantity must be greater than zero."})
+            if Decimal(str(line_item.get("rate") or 0)) < 0:
+                raise serializers.ValidationError({"line_items": f"Line {index}: rate cannot be negative."})
+            if Decimal(str(line_item.get("amount") or 0)) < 0:
+                raise serializers.ValidationError({"line_items": f"Line {index}: amount cannot be negative."})
+
+        return attrs
+
     def update(self, instance, validated_data):
         if instance.status == "cancelled":
             raise serializers.ValidationError("Cancelled sales returns cannot be edited.")
@@ -642,7 +679,7 @@ class SalesReturnSerializer(serializers.ModelSerializer):
         if not return_item.item:
             return
 
-        actual_item = Item.objects.select_for_update().get(id=return_item.item.id)
+        actual_item = Item.objects.select_for_update().get(id=return_item.item.id, business=business)
         apply_stock_movement(
             business=business,
             item=actual_item,
@@ -660,7 +697,7 @@ class SalesReturnSerializer(serializers.ModelSerializer):
         if not return_item.item:
             return
 
-        actual_item = Item.objects.select_for_update().get(id=return_item.item.id)
+        actual_item = Item.objects.select_for_update().get(id=return_item.item.id, business=business)
         apply_stock_movement(
             business=business,
             item=actual_item,
@@ -679,7 +716,30 @@ class CreditNoteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CreditNote
         fields = "__all__"
-        read_only_fields = ["id", "credit_note_number", "created_at"]
+        read_only_fields = ["id", "business", "credit_note_number", "created_at"]
+
+    def validate(self, attrs):
+        business = _serializer_business(self)
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        original_invoice = attrs.get("original_invoice") or getattr(self.instance, "original_invoice", None)
+        total_amount = Decimal(str(attrs.get("total_amount", getattr(self.instance, "total_amount", 0)) or 0))
+
+        if party and business:
+            if party.business_id != business.id or not party.is_active:
+                raise serializers.ValidationError({"party": "Choose an active customer from the active tenant."})
+            if party.party_type not in ["customer", "both"]:
+                raise serializers.ValidationError({"party": "Credit notes can only be linked to customer parties."})
+
+        if original_invoice and business:
+            if original_invoice.business_id != business.id:
+                raise serializers.ValidationError({"original_invoice": "Choose a sales invoice from the active tenant."})
+            if party and original_invoice.party_id != party.id:
+                raise serializers.ValidationError({"original_invoice": "The linked sales invoice must belong to the selected customer."})
+
+        if total_amount <= 0:
+            raise serializers.ValidationError({"total_amount": "Credit note total must be greater than zero."})
+
+        return attrs
 
     def create(self, validated_data):
         business = self.context["request"].business
@@ -693,3 +753,14 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             validated_data["business"] = business
             
             return CreditNote.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        if instance.status == "cancelled":
+            raise serializers.ValidationError("Cancelled credit notes cannot be edited.")
+
+        for attr, value in validated_data.items():
+            if attr in {"business", "credit_note_number"}:
+                continue
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
