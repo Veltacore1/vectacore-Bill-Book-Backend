@@ -261,6 +261,74 @@ class ItemInventoryLifecycleTests(APITestCase):
         self.assertEqual(len(transfers_response.data), 1)
         self.assertEqual(transfers_response.data[0]["item_name"], "TRANSFER ITEM")
 
+    def test_stock_adjustment_rejects_foreign_godown_without_fallback_mutation(self):
+        item = Item.objects.create(
+            business=self.business,
+            name="ADJUST ITEM",
+            category=self.category,
+            godown=self.godown,
+            selling_price=Decimal("250.00"),
+            purchase_price=Decimal("150.00"),
+            current_stock=Decimal("4.000"),
+        )
+        ItemGodownStock.objects.create(
+            business=self.business,
+            item=item,
+            godown=self.godown,
+            opening_stock=Decimal("4.000"),
+            current_stock=Decimal("4.000"),
+        )
+        foreign_godown = Godown.objects.create(business=self.other_business, name="Foreign Adjustment Store")
+
+        self.auth_as(self.user)
+        foreign_response = self.client.post(f"/api/v1/items/items/{item.id}/stock_adjustment/", {
+            "godown": str(foreign_godown.id),
+            "movement_type": "adjustment_in",
+            "quantity": "2.000",
+            "notes": "Should not land in default godown",
+        }, format="json")
+
+        self.assertEqual(foreign_response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        default_stock = ItemGodownStock.objects.get(business=self.business, item=item, godown=self.godown)
+        self.assertEqual(item.current_stock, Decimal("4.000"))
+        self.assertEqual(default_stock.current_stock, Decimal("4.000"))
+
+    def test_stock_adjustment_updates_selected_tenant_godown_and_aggregate_stock(self):
+        branch = Godown.objects.create(business=self.business, name="Adjustment Branch")
+        item = Item.objects.create(
+            business=self.business,
+            name="ADJUST BRANCH ITEM",
+            category=self.category,
+            godown=self.godown,
+            selling_price=Decimal("250.00"),
+            purchase_price=Decimal("150.00"),
+            current_stock=Decimal("4.000"),
+        )
+        ItemGodownStock.objects.create(
+            business=self.business,
+            item=item,
+            godown=self.godown,
+            opening_stock=Decimal("4.000"),
+            current_stock=Decimal("4.000"),
+        )
+
+        self.auth_as(self.user)
+        response = self.client.post(f"/api/v1/items/items/{item.id}/stock_adjustment/", {
+            "godown": str(branch.id),
+            "movement_type": "adjustment_in",
+            "quantity": "3.000",
+            "notes": "Branch opening adjustment",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        default_stock = ItemGodownStock.objects.get(business=self.business, item=item, godown=self.godown)
+        branch_stock = ItemGodownStock.objects.get(business=self.business, item=item, godown=branch)
+        self.assertEqual(default_stock.current_stock, Decimal("4.000"))
+        self.assertEqual(branch_stock.current_stock, Decimal("3.000"))
+        self.assertEqual(item.current_stock, Decimal("7.000"))
+
     def test_barcode_labels_are_real_tenant_records_and_persist_item_barcode(self):
         item = Item.objects.create(
             business=self.business,

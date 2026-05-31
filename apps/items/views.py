@@ -211,12 +211,17 @@ class ItemViewSet(viewsets.ModelViewSet):
         godown = None
         if godown_id:
             godown = Godown.objects.filter(id=godown_id, business=request.business).first()
+            if not godown:
+                return Response(
+                    {"success": False, "message": "Choose a valid godown from the active tenant."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         # adjustment_out represents stock REDUCTION, so movement is negative
         actual_qty = qty if adj_type == "adjustment_in" else -qty
         
         with transaction.atomic():
-            locked_item = Item.objects.select_for_update().get(id=item.id)
+            locked_item = Item.objects.select_for_update().get(id=item.id, business=request.business, is_active=True)
             stock, movement = apply_stock_movement(
                 business=request.business,
                 item=locked_item,
@@ -276,7 +281,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             )
             
         with transaction.atomic():
-            locked_item = Item.objects.select_for_update().get(id=item.id)
+            locked_item = Item.objects.select_for_update().get(id=item.id, business=request.business, is_active=True)
             source_stock = ItemGodownStock.objects.select_for_update().filter(
                 business=request.business,
                 item=locked_item,
