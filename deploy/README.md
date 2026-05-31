@@ -16,9 +16,12 @@ Edit `.env` and replace every placeholder secret. Production must use:
 DEBUG=False
 DEMO_SESSION_ENABLED=False
 CORS_ALLOW_ALL_ORIGINS=False
+CSRF_TRUSTED_ORIGINS=https://app.vastrabook.in
 SECURE_SSL_REDIRECT=True
 SESSION_COOKIE_SECURE=True
 CSRF_COOKIE_SECURE=True
+SECURE_REFERRER_POLICY=strict-origin-when-cross-origin
+X_FRAME_OPTIONS=DENY
 SMS_PROVIDER=<real provider>
 EMAIL_PROVIDER=resend
 RESEND_API_KEY=<real Resend key>

@@ -46,6 +46,21 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "ok")
 
+    @override_settings(
+        DEBUG=False,
+        SECURE_SSL_REDIRECT=False,
+        SECURE_CONTENT_TYPE_NOSNIFF=True,
+        SECURE_REFERRER_POLICY="strict-origin-when-cross-origin",
+        X_FRAME_OPTIONS="DENY",
+    )
+    def test_security_headers_are_set_on_public_health_response(self):
+        response = self.client.get("/healthz", secure=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response["Referrer-Policy"], "strict-origin-when-cross-origin")
+        self.assertEqual(response["X-Frame-Options"], "DENY")
+
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_login_uses_random_hashed_code_for_existing_tenant_user(self):
         business = Business.objects.create(name="OTP Tenant", phone="9000000091")
