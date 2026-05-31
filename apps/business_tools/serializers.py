@@ -2,9 +2,9 @@ from decimal import Decimal
 from math import ceil
 from django.db import transaction
 from django.db.models import Sum
-from django.conf import settings
 from django.utils import timezone
 from rest_framework import serializers
+from .messaging import sms_provider_ready
 from .models import SMSCampaign, SMSCreditLedger, SMSRecipient, SMSTemplate, OnlineOrder
 from apps.parties.models import Party
 
@@ -134,20 +134,6 @@ def sms_credit_balance(business):
     return credits - debits
 
 
-LOCAL_SMS_PROVIDERS = {"local_stub", "demo", "stub"}
-
-
-def sms_provider_ready():
-    provider = (getattr(settings, "SMS_PROVIDER", "disabled") or "disabled").strip().lower()
-    if provider in LOCAL_SMS_PROVIDERS:
-        return True, provider, ""
-    if provider in {"disabled", ""}:
-        return False, "disabled", "SMS provider is not configured."
-    if not getattr(settings, "SMS_PROVIDER_API_URL", "") or not getattr(settings, "SMS_PROVIDER_API_TOKEN", ""):
-        return False, provider, "SMS provider API URL and token are required for production delivery."
-    return True, provider, ""
-
-
 class SMSTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = SMSTemplate
@@ -164,7 +150,8 @@ class SMSRecipientSerializer(serializers.ModelSerializer):
         model = SMSRecipient
         fields = [
             "id", "party", "party_name", "mobile", "status",
-            "delivered_at", "error_message", "created_at",
+            "provider", "provider_message_id", "sent_at", "delivered_at",
+            "error_message", "created_at",
         ]
         read_only_fields = fields
 

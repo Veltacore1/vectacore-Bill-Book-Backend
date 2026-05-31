@@ -24,6 +24,7 @@ class ReminderSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = [
             "id", "business", "sent_at", "attempt_count", "last_attempt_at",
+            "delivery_provider", "provider_message_id", "provider_response",
             "delivery_message", "created_at",
         ]
 

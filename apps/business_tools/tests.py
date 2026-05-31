@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
-from apps.business_tools.models import OnlineOrder, SMSCampaign, SMSCreditLedger, SMSTemplate
+from apps.business_tools.models import OnlineOrder, SMSCampaign, SMSCreditLedger, SMSRecipient, SMSTemplate
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 
@@ -106,6 +106,68 @@ class SMSProviderBoundaryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(SMSCampaign.objects.count(), 0)
+
+    @override_settings(
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+    )
+    def test_sms_campaign_sync_calls_provider_and_records_delivery_status(self):
+        create_response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
+            "name": "Festival Campaign",
+            "template": str(self.template.id),
+            "audience": "all_customers",
+            "message": "Silk saree festival offer",
+            "send_now": True,
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        campaign = SMSCampaign.objects.get()
+        provider_response = self.provider_response({"id": "sms-msg-123"})
+
+        with mock.patch("apps.business_tools.messaging.urlopen", return_value=provider_response) as provider_call:
+            sync_response = self.client.post(f"/api/v1/business-tools/sms-campaigns/{campaign.id}/sync_delivery/", {}, format="json")
+
+        self.assertEqual(sync_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(sync_response.data["campaign"]["delivered_count"], 1)
+        self.assertEqual(sync_response.data["campaign"]["failed_count"], 0)
+        recipient = SMSRecipient.objects.get(campaign=campaign)
+        self.assertEqual(recipient.status, "sent")
+        self.assertEqual(recipient.provider, "sms_gateway")
+        self.assertEqual(recipient.provider_message_id, "sms-msg-123")
+        request = provider_call.call_args.args[0]
+        self.assertEqual(request.headers.get("Authorization"), "Bearer sms-token")
+        self.assertNotIn("sms-token", str(sync_response.data))
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["to"], "919999999999")
+        self.assertEqual(payload["metadata"]["campaignNumber"], campaign.campaign_number)
+
+    @override_settings(
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+    )
+    def test_sms_campaign_sync_records_provider_failure_per_recipient(self):
+        create_response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
+            "name": "Festival Campaign",
+            "template": str(self.template.id),
+            "audience": "all_customers",
+            "message": "Silk saree festival offer",
+            "send_now": True,
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        campaign = SMSCampaign.objects.get()
+        provider_response = self.provider_response({"message": "Invalid sender"}, status_code=400)
+
+        with mock.patch("apps.business_tools.messaging.urlopen", return_value=provider_response):
+            sync_response = self.client.post(f"/api/v1/business-tools/sms-campaigns/{campaign.id}/sync_delivery/", {}, format="json")
+
+        self.assertEqual(sync_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(sync_response.data["campaign"]["delivered_count"], 0)
+        self.assertEqual(sync_response.data["campaign"]["failed_count"], 1)
+        recipient = SMSRecipient.objects.get(campaign=campaign)
+        self.assertEqual(recipient.status, "failed")
+        self.assertEqual(recipient.provider, "sms_gateway")
+        self.assertIn("HTTP 400", recipient.error_message)
 
     @override_settings(
         SHIPPING_PROVIDER="shiprocket",

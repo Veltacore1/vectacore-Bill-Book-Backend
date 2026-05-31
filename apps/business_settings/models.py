@@ -123,6 +123,9 @@ class Reminder(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     attempt_count = models.PositiveIntegerField(default=0)
     last_attempt_at = models.DateTimeField(blank=True, null=True)
+    delivery_provider = models.CharField(max_length=50, blank=True, default="")
+    provider_message_id = models.CharField(max_length=120, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
     delivery_message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 

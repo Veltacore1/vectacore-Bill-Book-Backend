@@ -1,4 +1,7 @@
+import json
+from unittest import mock
 from datetime import timedelta
+from urllib.parse import parse_qs
 
 from django.test import override_settings
 from django.utils import timezone
@@ -38,6 +41,14 @@ class ReminderDeliveryLifecycleTests(APITestCase):
         token = RefreshToken.for_user(self.user).access_token
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
+    def provider_response(self, payload, status_code=200):
+        response = mock.MagicMock()
+        response.status = status_code
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__.return_value = response
+        return response
+
+    @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_reminder_create_pending_and_dispatch_sent_with_local_stub(self):
         create_response = self.client.post("/api/v1/settings/reminders/", {
             "party": str(self.party.id),
@@ -91,6 +102,71 @@ class ReminderDeliveryLifecycleTests(APITestCase):
         self.assertEqual(reminder.status, "failed")
         self.assertEqual(reminder.attempt_count, 1)
         self.assertIn("not configured", reminder.delivery_message)
+
+    @override_settings(
+        WHATSAPP_PROVIDER="gupshup",
+        GUPSHUP_API_URL="https://gupshup.example.test/wa/api/v1/msg",
+        GUPSHUP_API_KEY="gupshup-token",
+        GUPSHUP_APP_NAME="VastraBook",
+        GUPSHUP_SOURCE_NUMBER="919000000000",
+    )
+    def test_dispatch_due_sends_whatsapp_through_gupshup_and_persists_provider_id(self):
+        reminder = Reminder.objects.create(
+            business=self.business,
+            party=self.party,
+            message="WhatsApp provider test.",
+            channel="whatsapp",
+            scheduled_at=timezone.now(),
+        )
+        provider_response = self.provider_response({"messageId": "wa-msg-123", "status": "submitted"})
+
+        with mock.patch("apps.business_tools.messaging.urlopen", return_value=provider_response) as provider_call:
+            response = self.client.post("/api/v1/settings/reminders/dispatch_due/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["sentCount"], 1)
+        reminder.refresh_from_db()
+        self.assertEqual(reminder.status, "sent")
+        self.assertEqual(reminder.delivery_provider, "gupshup")
+        self.assertEqual(reminder.provider_message_id, "wa-msg-123")
+        request = provider_call.call_args.args[0]
+        self.assertEqual(request.headers.get("Apikey"), "gupshup-token")
+        payload = parse_qs(request.data.decode("utf-8"))
+        self.assertEqual(payload["destination"][0], "919999990001")
+        self.assertEqual(json.loads(payload["message"][0])["text"], "WhatsApp provider test.")
+        self.assertNotIn("gupshup-token", str(response.data))
+
+    @override_settings(
+        WHATSAPP_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="AC123456789",
+        TWILIO_AUTH_TOKEN="twilio-token",
+        TWILIO_WHATSAPP_FROM="+14155238886",
+        TWILIO_API_URL="https://twilio.example.test",
+    )
+    def test_dispatch_due_supports_twilio_whatsapp_provider(self):
+        reminder = Reminder.objects.create(
+            business=self.business,
+            party=self.party,
+            message="Twilio WhatsApp provider test.",
+            channel="whatsapp",
+            scheduled_at=timezone.now(),
+        )
+        provider_response = self.provider_response({"sid": "SM123"})
+
+        with mock.patch("apps.business_tools.messaging.urlopen", return_value=provider_response) as provider_call:
+            response = self.client.post("/api/v1/settings/reminders/dispatch_due/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reminder.refresh_from_db()
+        self.assertEqual(reminder.status, "sent")
+        self.assertEqual(reminder.delivery_provider, "twilio")
+        self.assertEqual(reminder.provider_message_id, "SM123")
+        request = provider_call.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/2010-04-01/Accounts/AC123456789/Messages.json"))
+        payload = parse_qs(request.data.decode("utf-8"))
+        self.assertEqual(payload["To"][0], "whatsapp:+919999990001")
+        self.assertEqual(payload["Body"][0], "Twilio WhatsApp provider test.")
+        self.assertNotIn("twilio-token", str(response.data))
 
     def test_reminder_rejects_cross_tenant_party(self):
         response = self.client.post("/api/v1/settings/reminders/", {

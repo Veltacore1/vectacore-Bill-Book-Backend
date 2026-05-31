@@ -78,6 +78,7 @@ GUPSHUP_SOURCE_NUMBER=...
 ```
 
 If you use Twilio for WhatsApp, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` instead of the Gupshup variables.
+Optionally override `TWILIO_API_URL` for test doubles; production defaults to `https://api.twilio.com`.
 
 ## CI/CD
 

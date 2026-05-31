@@ -158,6 +158,7 @@ class SMSCampaign(models.Model):
 class SMSRecipient(models.Model):
     STATUS_CHOICES = (
         ("queued", "Queued"),
+        ("sent", "Sent"),
         ("delivered", "Delivered"),
         ("failed", "Failed"),
     )
@@ -169,6 +170,10 @@ class SMSRecipient(models.Model):
     party_name = models.CharField(max_length=255)
     mobile = models.CharField(max_length=20)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    provider = models.CharField(max_length=50, blank=True, default="")
+    provider_message_id = models.CharField(max_length=120, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
+    sent_at = models.DateTimeField(blank=True, null=True)
     delivered_at = models.DateTimeField(blank=True, null=True)
     error_message = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)

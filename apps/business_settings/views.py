@@ -58,6 +58,8 @@ def _build_pending_notification_snapshot(business):
             "status": reminder.status,
             "attemptCount": reminder.attempt_count,
             "lastAttemptAt": timezone.localtime(reminder.last_attempt_at).isoformat() if reminder.last_attempt_at else "",
+            "deliveryProvider": reminder.delivery_provider,
+            "providerMessageId": reminder.provider_message_id,
             "deliveryMessage": reminder.delivery_message,
         }
         pending_reminders.append(row)
@@ -615,38 +617,44 @@ class ReminderViewSet(viewsets.ModelViewSet):
 
         limit = min(int(request.data.get("limit") or 50), 100)
         now = timezone.now()
-        from apps.business_tools.serializers import sms_provider_ready
-
-        ready, provider, provider_message = sms_provider_ready()
         sent_rows = []
         failed_rows = []
+        from apps.business_tools.messaging import send_reminder_message
 
-        with transaction.atomic():
-            due_reminders = list(
-                Reminder.objects.select_for_update()
-                .filter(business=business, status="pending")
-                .filter(Q(scheduled_at__isnull=True) | Q(scheduled_at__lte=now))
-                .order_by("scheduled_at", "created_at")[:limit]
-            )
+        due_reminders = list(
+            Reminder.objects.filter(business=business, status="pending")
+            .filter(Q(scheduled_at__isnull=True) | Q(scheduled_at__lte=now))
+            .select_related("party", "business")
+            .order_by("scheduled_at", "created_at")[:limit]
+        )
 
-            for reminder in due_reminders:
+        for reminder in due_reminders:
+            delivery = send_reminder_message(reminder)
+            attempt_time = timezone.now()
+            party_name = reminder.party.name if reminder.party_id else ""
+            with transaction.atomic():
+                reminder = Reminder.objects.select_for_update().get(
+                    id=reminder.id,
+                    business=business,
+                )
+                if reminder.status != "pending":
+                    continue
                 reminder.attempt_count += 1
-                reminder.last_attempt_at = now
-                if ready:
+                reminder.last_attempt_at = attempt_time
+                reminder.delivery_provider = delivery.provider
+                reminder.provider_message_id = delivery.provider_message_id
+                reminder.provider_response = delivery.provider_response
+                reminder.delivery_message = delivery.message
+                if delivery.delivered:
                     reminder.status = "sent"
-                    reminder.sent_at = now
-                    reminder.delivery_message = (
-                        f"{provider} accepted {reminder.channel} reminder"
-                        if provider
-                        else f"{reminder.channel} reminder delivered"
-                    )
+                    reminder.sent_at = attempt_time
                     sent_rows.append(reminder)
                 else:
                     reminder.status = "failed"
-                    reminder.delivery_message = provider_message or f"{provider} provider is not ready"
                     failed_rows.append(reminder)
                 reminder.save(update_fields=[
                     "status", "sent_at", "attempt_count", "last_attempt_at",
+                    "delivery_provider", "provider_message_id", "provider_response",
                     "delivery_message",
                 ])
                 try:
@@ -659,9 +667,11 @@ class ReminderViewSet(viewsets.ModelViewSet):
                         entity_type="reminder",
                         entity_id=reminder.id,
                         details={
-                            "party": reminder.party.name if reminder.party_id else "",
+                            "party": party_name,
                             "channel": reminder.channel,
                             "status": reminder.status,
+                            "provider": reminder.delivery_provider,
+                            "providerMessageId": reminder.provider_message_id,
                             "attemptCount": reminder.attempt_count,
                             "deliveryMessage": reminder.delivery_message,
                         },
@@ -675,9 +685,11 @@ class ReminderViewSet(viewsets.ModelViewSet):
                         priority="low" if reminder.status == "sent" else "high",
                         target="settings",
                         metadata={
-                            "partyName": reminder.party.name if reminder.party_id else "",
+                            "partyName": party_name,
                             "channel": reminder.channel,
                             "status": reminder.status,
+                            "provider": reminder.delivery_provider,
+                            "providerMessageId": reminder.provider_message_id,
                             "attemptCount": reminder.attempt_count,
                             "reminderId": str(reminder.id),
                         },
@@ -691,7 +703,7 @@ class ReminderViewSet(viewsets.ModelViewSet):
             "data": {
                 "sentCount": len(sent_rows),
                 "failedCount": len(failed_rows),
-                "provider": provider,
+                "provider": sent_rows[0].delivery_provider if sent_rows else (failed_rows[0].delivery_provider if failed_rows else ""),
                 "reminders": ReminderSerializer(sent_rows + failed_rows, many=True, context={"request": request}).data,
             },
         })

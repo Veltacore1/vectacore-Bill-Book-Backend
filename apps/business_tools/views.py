@@ -10,8 +10,8 @@ from .serializers import (
     SMSCreditLedgerSerializer,
     SMSTemplateSerializer,
     OnlineOrderSerializer,
-    sms_provider_ready,
 )
+from .messaging import send_sms_message, sms_provider_ready
 from .shipping import (
     ShippingConfigurationError,
     ShippingDeliveryError,
@@ -299,23 +299,53 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        with transaction.atomic():
-            now = timezone.now()
-            updated = SMSRecipient.objects.filter(
+        queued_recipients = list(
+            SMSRecipient.objects.filter(
                 business=request.business,
                 campaign=campaign,
                 status="queued",
-            ).update(status="delivered", delivered_at=now)
-            campaign.delivered_count = campaign.recipients.filter(status="delivered").count()
-            campaign.failed_count = campaign.recipients.filter(status="failed").count()
-            campaign.status = "completed"
-            campaign.completed_at = now
-            campaign.save(update_fields=["delivered_count", "failed_count", "status", "completed_at", "updated_at"])
+            ).order_by("created_at", "party_name")
+        )
+        sent_count = 0
+        failed_count = 0
+        for recipient in queued_recipients:
+            delivery = send_sms_message(
+                to=recipient.mobile,
+                message=campaign.message,
+                metadata={
+                    "campaignId": str(campaign.id),
+                    "campaignNumber": campaign.campaign_number,
+                    "recipientId": str(recipient.id),
+                },
+            )
+            now = timezone.now()
+            recipient.provider = delivery.provider
+            recipient.provider_message_id = delivery.provider_message_id
+            recipient.provider_response = delivery.provider_response
+            if delivery.delivered:
+                recipient.status = "sent"
+                recipient.sent_at = now
+                recipient.error_message = ""
+                sent_count += 1
+            else:
+                recipient.status = "failed"
+                recipient.error_message = delivery.message
+                failed_count += 1
+            recipient.save(update_fields=[
+                "status", "provider", "provider_message_id", "provider_response",
+                "sent_at", "error_message",
+            ])
+
+        campaign.delivered_count = campaign.recipients.filter(status__in=["sent", "delivered"]).count()
+        campaign.failed_count = campaign.recipients.filter(status="failed").count()
+        campaign.status = "completed"
+        campaign.completed_at = timezone.now()
+        campaign.save(update_fields=["delivered_count", "failed_count", "status", "completed_at", "updated_at"])
 
         serializer = self.get_serializer(campaign)
         return Response({
             "success": True,
-            "message": f"Delivery synced for {updated} recipients",
+            "message": f"{sent_count} messages accepted, {failed_count} failed",
             "campaign": serializer.data,
         })
 
