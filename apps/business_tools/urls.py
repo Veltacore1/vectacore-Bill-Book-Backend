@@ -1,6 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import SMSCampaignViewSet, SMSCreditLedgerViewSet, SMSTemplateViewSet, OnlineOrderViewSet
+from .views import (
+    MessagingWebhookView,
+    OnlineOrderViewSet,
+    SMSCampaignViewSet,
+    SMSCreditLedgerViewSet,
+    SMSTemplateViewSet,
+)
 
 router = DefaultRouter()
 router.include_format_suffixes = False
@@ -10,5 +16,6 @@ router.register(r"sms-campaigns", SMSCampaignViewSet, basename="sms_campaigns")
 router.register(r"sms-credits", SMSCreditLedgerViewSet, basename="sms_credits")
 
 urlpatterns = [
+    path("webhooks/messaging/<slug:provider>/", MessagingWebhookView.as_view(), name="messaging_webhook"),
     path("", include(router.urls)),
 ]

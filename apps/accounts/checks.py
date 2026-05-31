@@ -158,6 +158,14 @@ def production_safety_checks(app_configs, **kwargs):
             id="accounts.E017",
         ))
 
+    messaging_callbacks_enabled = sms_provider not in {"disabled", ""} and sms_provider not in LOCAL_SMS_PROVIDERS
+    messaging_callbacks_enabled = messaging_callbacks_enabled or whatsapp_provider not in {"disabled", ""}
+    if messaging_callbacks_enabled and not getattr(settings, "MESSAGING_WEBHOOK_SECRET", ""):
+        issues.append(Error(
+            "MESSAGING_WEBHOOK_SECRET is required for SMS/WhatsApp delivery receipt callbacks.",
+            id="accounts.E018",
+        ))
+
     engine = settings.DATABASES.get("default", {}).get("ENGINE", "")
     if engine.endswith("sqlite3"):
         issues.append(Error(

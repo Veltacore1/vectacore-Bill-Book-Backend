@@ -1221,9 +1221,26 @@ class TenantWorkspaceView(views.APIView):
                 "queuedAt": _date(campaign.queued_at),
                 "completedAt": _date(campaign.completed_at),
                 "createdAt": _date(campaign.created_at),
+                "recipients": [
+                    {
+                        "id": str(recipient.id),
+                        "partyId": str(recipient.party_id) if recipient.party_id else "",
+                        "partyName": recipient.party_name,
+                        "mobile": recipient.mobile,
+                        "status": recipient.status,
+                        "provider": recipient.provider,
+                        "providerMessageId": recipient.provider_message_id,
+                        "sentAt": _date(recipient.sent_at),
+                        "deliveredAt": _date(recipient.delivered_at),
+                        "errorMessage": recipient.error_message or "",
+                        "createdAt": _date(recipient.created_at),
+                    }
+                    for recipient in campaign.recipients.all()
+                ],
             }
             for campaign in SMSCampaign.objects.filter(business=business)
             .select_related("template")
+            .prefetch_related("recipients")
             .order_by("-created_at")
         ]
         invoice_settings, created = InvoiceSettings.objects.get_or_create(

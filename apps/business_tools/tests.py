@@ -7,7 +7,15 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
-from apps.business_tools.models import OnlineOrder, SMSCampaign, SMSCreditLedger, SMSRecipient, SMSTemplate
+from apps.business_settings.models import Reminder
+from apps.business_tools.models import (
+    MessagingDeliveryEvent,
+    OnlineOrder,
+    SMSCampaign,
+    SMSCreditLedger,
+    SMSRecipient,
+    SMSTemplate,
+)
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 
@@ -94,6 +102,31 @@ class SMSProviderBoundaryTests(APITestCase):
             created_by=self.user,
         )
 
+    def make_campaign_with_sent_recipient(self):
+        campaign = SMSCampaign.objects.create(
+            business=self.business,
+            campaign_number="SMT/SMS/26-27/0001",
+            name="Webhook Campaign",
+            message="Webhook status test.",
+            audience="all_customers",
+            recipient_count=1,
+            delivered_count=1,
+            credit_cost=1,
+            status="completed",
+            created_by=self.user,
+        )
+        recipient = SMSRecipient.objects.create(
+            business=self.business,
+            campaign=campaign,
+            party=self.party,
+            party_name=self.party.name,
+            mobile=self.party.mobile,
+            status="sent",
+            provider="sms_gateway",
+            provider_message_id="sms-msg-123",
+        )
+        return campaign, recipient
+
     @override_settings(SMS_PROVIDER="disabled", SMS_PROVIDER_API_URL="", SMS_PROVIDER_API_TOKEN="")
     def test_send_now_requires_configured_provider(self):
         response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
@@ -168,6 +201,88 @@ class SMSProviderBoundaryTests(APITestCase):
         self.assertEqual(recipient.status, "failed")
         self.assertEqual(recipient.provider, "sms_gateway")
         self.assertIn("HTTP 400", recipient.error_message)
+
+    @override_settings(MESSAGING_WEBHOOK_SECRET="webhook-secret")
+    def test_messaging_webhook_updates_sms_recipient_and_is_idempotent(self):
+        campaign, recipient = self.make_campaign_with_sent_recipient()
+        payload = {
+            "eventId": "evt-sms-delivered-1",
+            "messageId": "sms-msg-123",
+            "status": "delivered",
+        }
+
+        first_response = self.client.post(
+            "/api/v1/business-tools/webhooks/messaging/sms_gateway/",
+            json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+            HTTP_X_VASTRABOOK_WEBHOOK_SECRET="webhook-secret",
+        )
+        second_response = self.client.post(
+            "/api/v1/business-tools/webhooks/messaging/sms_gateway/",
+            json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+            HTTP_X_VASTRABOOK_WEBHOOK_SECRET="webhook-secret",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data["processed"])
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_response.data["processed"])
+        self.assertEqual(MessagingDeliveryEvent.objects.filter(provider="sms_gateway", event_id="evt-sms-delivered-1").count(), 1)
+        recipient.refresh_from_db()
+        campaign.refresh_from_db()
+        self.assertEqual(recipient.status, "delivered")
+        self.assertIsNotNone(recipient.delivered_at)
+        self.assertEqual(campaign.delivered_count, 1)
+        self.assertEqual(campaign.failed_count, 0)
+
+    @override_settings(MESSAGING_WEBHOOK_SECRET="webhook-secret")
+    def test_messaging_webhook_rejects_invalid_secret_without_updating_delivery(self):
+        _campaign, recipient = self.make_campaign_with_sent_recipient()
+
+        response = self.client.post(
+            "/api/v1/business-tools/webhooks/messaging/sms_gateway/",
+            {"eventId": "evt-bad-secret", "messageId": "sms-msg-123", "status": "failed"},
+            format="json",
+            HTTP_X_VASTRABOOK_WEBHOOK_SECRET="wrong-secret",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(MessagingDeliveryEvent.objects.filter(event_id="evt-bad-secret").exists())
+        recipient.refresh_from_db()
+        self.assertEqual(recipient.status, "sent")
+
+    @override_settings(MESSAGING_WEBHOOK_SECRET="webhook-secret")
+    def test_messaging_webhook_updates_whatsapp_reminder_failure(self):
+        reminder = Reminder.objects.create(
+            business=self.business,
+            party=self.party,
+            message="Webhook reminder status test.",
+            channel="whatsapp",
+            status="sent",
+            delivery_provider="gupshup",
+            provider_message_id="wa-msg-123",
+        )
+
+        response = self.client.post(
+            "/api/v1/business-tools/webhooks/messaging/gupshup/",
+            {
+                "eventId": "evt-wa-failed-1",
+                "messageId": "wa-msg-123",
+                "status": "failed",
+                "error": "User cannot receive WhatsApp messages",
+            },
+            format="json",
+            HTTP_X_VASTRABOOK_WEBHOOK_SECRET="webhook-secret",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reminder.refresh_from_db()
+        event = MessagingDeliveryEvent.objects.get(event_id="evt-wa-failed-1")
+        self.assertEqual(event.business, self.business)
+        self.assertEqual(event.target_type, "reminder")
+        self.assertEqual(reminder.status, "failed")
+        self.assertIn("failed", reminder.delivery_message.lower())
 
     @override_settings(
         SHIPPING_PROVIDER="shiprocket",

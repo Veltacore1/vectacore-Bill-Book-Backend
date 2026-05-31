@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from rest_framework import permissions, serializers, status, viewsets
+from rest_framework import permissions, serializers, status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
@@ -11,7 +11,12 @@ from .serializers import (
     SMSTemplateSerializer,
     OnlineOrderSerializer,
 )
-from .messaging import send_sms_message, sms_provider_ready
+from .messaging import (
+    process_messaging_delivery_webhook,
+    send_sms_message,
+    sms_provider_ready,
+    verify_messaging_webhook,
+)
 from .shipping import (
     ShippingConfigurationError,
     ShippingDeliveryError,
@@ -358,3 +363,31 @@ class SMSCreditLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         if not self.request.business:
             return SMSCreditLedger.objects.none()
         return SMSCreditLedger.objects.filter(business=self.request.business).order_by("-created_at")
+
+
+class MessagingWebhookView(views.APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, provider):
+        verified, message = verify_messaging_webhook(
+            request.body,
+            request.headers,
+            request.query_params.get("token", ""),
+        )
+        if not verified:
+            return Response({"success": False, "message": message}, status=status.HTTP_403_FORBIDDEN)
+
+        event, processed = process_messaging_delivery_webhook(
+            provider=provider,
+            payload=request.data,
+            raw_body=request.body,
+            headers=request.headers,
+        )
+        return Response({
+            "success": True,
+            "processed": processed,
+            "eventId": str(event.id),
+            "status": event.status,
+            "targetType": event.target_type,
+        })

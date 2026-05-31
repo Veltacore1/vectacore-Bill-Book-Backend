@@ -204,6 +204,7 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
 TWILIO_API_URL = os.getenv("TWILIO_API_URL", "https://api.twilio.com").strip()
+MESSAGING_WEBHOOK_SECRET = os.getenv("MESSAGING_WEBHOOK_SECRET", "").strip()
 
 # JWT settings
 SIMPLE_JWT = {

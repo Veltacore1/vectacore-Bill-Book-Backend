@@ -205,3 +205,48 @@ class SMSCreditLedger(models.Model):
         indexes = [
             models.Index(fields=["business", "created_at"], name="sms_credit_busines_a80572_idx"),
         ]
+
+
+class MessagingDeliveryEvent(models.Model):
+    CHANNEL_CHOICES = (
+        ("sms", "SMS"),
+        ("whatsapp", "WhatsApp"),
+        ("email", "Email"),
+        ("unknown", "Unknown"),
+    )
+    TARGET_TYPE_CHOICES = (
+        ("sms_recipient", "SMS Recipient"),
+        ("reminder", "Reminder"),
+        ("unknown", "Unknown"),
+    )
+    STATUS_CHOICES = (
+        ("processed", "Processed"),
+        ("failed", "Failed"),
+        ("ignored", "Ignored"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.SET_NULL, null=True, blank=True, related_name="messaging_events")
+    provider = models.CharField(max_length=50)
+    event_id = models.CharField(max_length=120)
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default="unknown")
+    provider_message_id = models.CharField(max_length=120, blank=True, default="")
+    provider_status = models.CharField(max_length=80, blank=True, default="")
+    normalized_status = models.CharField(max_length=20, blank=True, default="")
+    target_type = models.CharField(max_length=30, choices=TARGET_TYPE_CHOICES, default="unknown")
+    target_id = models.UUIDField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="processed")
+    payload = models.JSONField(default=dict, blank=True)
+    message = models.TextField(blank=True, default="")
+    processed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "messaging_delivery_events"
+        constraints = [
+            models.UniqueConstraint(fields=["provider", "event_id"], name="uniq_msg_event_provider_id"),
+        ]
+        indexes = [
+            models.Index(fields=["provider", "provider_message_id"], name="msg_event_provider_msg_idx"),
+            models.Index(fields=["business", "-created_at"], name="msg_event_business_idx"),
+        ]

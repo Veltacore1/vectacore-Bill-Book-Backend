@@ -237,6 +237,7 @@ class TenantOnboardingPermissionTests(APITestCase):
         GUPSHUP_API_KEY="gupshup-token",
         GUPSHUP_APP_NAME="VastraBook",
         GUPSHUP_SOURCE_NUMBER="919000000000",
+        MESSAGING_WEBHOOK_SECRET="messaging-webhook-secret",
         DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "vastrabook_test"}},
     )
     def test_production_checks_accept_configured_external_providers(self):
