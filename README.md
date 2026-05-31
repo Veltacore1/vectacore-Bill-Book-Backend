@@ -35,6 +35,14 @@ SMS_PROVIDER_API_TOKEN=...
 
 When `DEBUG=False`, the local SMS stub is rejected and OTP codes are never returned in API responses. OTPs are stored as HMAC digests, expire after 10 minutes, and only existing active tenant users can receive or verify login codes.
 
+Successful login, registration, and demo-session responses also set the refresh token as an HttpOnly cookie. The React app keeps access tokens in memory and refreshes through:
+
+```bash
+POST /api/v1/auth/token/refresh
+```
+
+Configure cookie scope through `AUTH_REFRESH_COOKIE_NAME`, `AUTH_REFRESH_COOKIE_PATH`, `AUTH_REFRESH_COOKIE_SAMESITE`, and `AUTH_REFRESH_COOKIE_SECURE`. Production should keep `AUTH_REFRESH_COOKIE_SECURE=True` behind HTTPS.
+
 ## Email Delivery
 
 Report sharing and CA report bundles can send real read-only report links through Resend. Configure the provider through environment variables only:

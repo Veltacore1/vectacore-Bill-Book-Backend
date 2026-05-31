@@ -203,6 +203,31 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
         self.assertEqual(workspace_response.data["business"]["name"], "Refresh Tenant")
 
+    def test_refresh_token_endpoint_accepts_httponly_cookie_session(self):
+        business = Business.objects.create(name="Cookie Refresh Tenant", phone="9000000198")
+        user = self.make_user(business, "9000000199", "admin", "Cookie Refresh Admin")
+        refresh = RefreshToken.for_user(user)
+        self.client.cookies["vastrabook_refresh"] = str(refresh)
+
+        response = self.client.post("/api/v1/auth/token/refresh", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("vastrabook_refresh", response.cookies)
+        refresh_cookie = response.cookies["vastrabook_refresh"]
+        self.assertTrue(refresh_cookie["httponly"])
+        self.assertEqual(refresh_cookie["path"], "/api/v1/auth")
+
+    def test_logout_clears_refresh_cookie(self):
+        self.client.cookies["vastrabook_refresh"] = "stale-refresh-token"
+
+        response = self.client.post("/api/v1/auth/logout", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("vastrabook_refresh", response.cookies)
+        self.assertEqual(response.cookies["vastrabook_refresh"].value, "")
+        self.assertEqual(response.cookies["vastrabook_refresh"]["path"], "/api/v1/auth")
+
     @override_settings(
         DEBUG=False,
         SECRET_KEY="django-insecure-test",
@@ -317,6 +342,8 @@ class TenantOnboardingPermissionTests(APITestCase):
         }, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("vastrabook_refresh", response.cookies)
+        self.assertTrue(response.cookies["vastrabook_refresh"]["httponly"])
         business = Business.objects.get(name="Fresh Textile House")
         self.assertEqual(User.objects.get(mobile="9000000001").business, business)
         self.assertEqual(Party.objects.filter(business=business).count(), 0)

@@ -7,7 +7,9 @@ from django.utils import timezone
 from rest_framework import status, views, viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenRefreshView
 from .models import Business, User, OTPToken, ActivityLog
 from .otp import OTP_TTL_MINUTES, dispatch_login_otp, generate_login_otp, otp_digest, otp_matches
 from .permissions import RoleModulePermission, role_permissions_for
@@ -122,6 +124,43 @@ def _token_payload(user):
         "access": str(refresh.access_token),
         "refresh": str(refresh),
     }
+
+
+def _refresh_cookie_max_age():
+    lifetime = settings.SIMPLE_JWT.get("REFRESH_TOKEN_LIFETIME")
+    if not lifetime:
+        return None
+    return int(lifetime.total_seconds())
+
+
+def _set_refresh_cookie(response, refresh_token):
+    response.set_cookie(
+        settings.AUTH_REFRESH_COOKIE_NAME,
+        refresh_token,
+        max_age=_refresh_cookie_max_age(),
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        secure=settings.AUTH_REFRESH_COOKIE_SECURE,
+        httponly=True,
+        samesite=settings.AUTH_REFRESH_COOKIE_SAMESITE,
+    )
+    return response
+
+
+def _clear_refresh_cookie(response):
+    response.delete_cookie(
+        settings.AUTH_REFRESH_COOKIE_NAME,
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        samesite=settings.AUTH_REFRESH_COOKIE_SAMESITE,
+    )
+    return response
+
+
+def _response_with_refresh_cookie(payload, *, status_code=status.HTTP_200_OK):
+    response = Response(payload, status=status_code)
+    refresh_token = payload.get("tokens", {}).get("refresh")
+    if refresh_token:
+        _set_refresh_cookie(response, refresh_token)
+    return response
 
 
 def _activity_time(value):
@@ -311,6 +350,36 @@ class HealthCheckView(views.APIView):
         })
 
 
+class CookieTokenRefreshView(TokenRefreshView):
+    serializer_class = TokenRefreshSerializer
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        payload = request.data.copy()
+        if not payload.get("refresh"):
+            cookie_refresh = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME)
+            if cookie_refresh:
+                payload["refresh"] = cookie_refresh
+
+        serializer = self.get_serializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+        refresh_token = serializer.validated_data.get("refresh") or payload.get("refresh")
+        if refresh_token:
+            _set_refresh_cookie(response, refresh_token)
+        return response
+
+
+class LogoutView(views.APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        response = Response({"success": True, "message": "Session cleared"})
+        return _clear_refresh_cookie(response)
+
+
 class TextileTenantRegistrationView(views.APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [TenantScopedRateThrottle]
@@ -373,7 +442,7 @@ class TextileTenantRegistrationView(views.APIView):
             },
         )
 
-        return Response({
+        return _response_with_refresh_cookie({
             "success": True,
             "message": "Textile tenant registered successfully",
             "business": _business_payload(business),
@@ -387,7 +456,7 @@ class TextileTenantRegistrationView(views.APIView):
                 "paymentsIn": 0,
                 "paymentsOut": 0,
             },
-        }, status=status.HTTP_201_CREATED)
+        }, status_code=status.HTTP_201_CREATED)
 
 class SendOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
@@ -489,14 +558,10 @@ class VerifyOTPView(views.APIView):
         user.last_login_at = timezone.now()
         user.save(update_fields=["last_login_at"])
 
-        refresh = RefreshToken.for_user(user)
-        return Response({
+        return _response_with_refresh_cookie({
             "success": True,
             "user": UserSerializer(user).data,
-            "tokens": {
-                "access": str(refresh.access_token),
-                "refresh": str(refresh)
-            }
+            "tokens": _token_payload(user),
         })
 
 class DemoSessionView(views.APIView):
@@ -519,15 +584,11 @@ class DemoSessionView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        refresh = RefreshToken.for_user(user)
-        return Response({
+        return _response_with_refresh_cookie({
             "success": True,
             "user": UserSerializer(user).data,
             "business": _business_payload(user.business),
-            "tokens": {
-                "access": str(refresh.access_token),
-                "refresh": str(refresh)
-            }
+            "tokens": _token_payload(user),
         })
 
 class UserProfileView(views.APIView):

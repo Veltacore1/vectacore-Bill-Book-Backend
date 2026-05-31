@@ -148,6 +148,14 @@ CSRF_TRUSTED_ORIGINS = [
     if origin.strip()
 ]
 
+# Browser auth hardening. Access tokens are short lived and returned to the
+# React app, while refresh tokens are also set as HttpOnly cookies so the app
+# does not need to persist them in localStorage.
+AUTH_REFRESH_COOKIE_NAME = os.getenv("AUTH_REFRESH_COOKIE_NAME", "vastrabook_refresh")
+AUTH_REFRESH_COOKIE_PATH = os.getenv("AUTH_REFRESH_COOKIE_PATH", "/api/v1/auth")
+AUTH_REFRESH_COOKIE_SAMESITE = os.getenv("AUTH_REFRESH_COOKIE_SAMESITE", "Lax")
+AUTH_REFRESH_COOKIE_SECURE = os.getenv("AUTH_REFRESH_COOKIE_SECURE", "False" if DEBUG else "True") == "True"
+
 # REST Framework settings
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
