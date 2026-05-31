@@ -3,6 +3,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import permissions, serializers, status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from apps.accounts.throttles import TenantScopedRateThrottle
 from django.utils import timezone
 from .models import SMSCampaign, SMSCreditLedger, SMSRecipient, SMSTemplate, OnlineOrder
 from .serializers import (
@@ -368,6 +369,8 @@ class SMSCreditLedgerViewSet(viewsets.ReadOnlyModelViewSet):
 class MessagingWebhookView(views.APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "messaging_webhook"
 
     def post(self, request, provider):
         verified, message = verify_messaging_webhook(

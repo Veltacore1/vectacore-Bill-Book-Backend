@@ -1,6 +1,7 @@
 from unittest import mock
 
 from django.core.checks import Tags, run_checks
+from django.core.cache import cache
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -88,6 +89,28 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertIn("access", verify_response.data["tokens"])
         token.refresh_from_db()
         self.assertTrue(token.used)
+
+    @override_settings(
+        DEBUG=True,
+        SMS_PROVIDER="local_stub",
+        REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {"auth_otp": "2/minute"}},
+    )
+    def test_otp_send_is_scoped_throttled_before_token_creation(self):
+        cache.clear()
+        business = Business.objects.create(name="Throttled OTP Tenant", phone="9000000101")
+        self.make_user(business, "9000000102", "admin", "Throttled Admin")
+
+        responses = [
+            self.client.post("/api/v1/auth/send-otp", {"mobile": "9000000102"}, format="json")
+            for _ in range(3)
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [
+            status.HTTP_200_OK,
+            status.HTTP_200_OK,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        ])
+        self.assertEqual(OTPToken.objects.filter(mobile="9000000102").count(), 2)
 
     @override_settings(DEBUG=False, SMS_PROVIDER="disabled")
     def test_otp_send_requires_real_sms_provider_for_registered_user(self):

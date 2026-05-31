@@ -82,6 +82,8 @@ If you use Twilio for WhatsApp, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOK
 Optionally override `TWILIO_API_URL` for test doubles; production defaults to `https://api.twilio.com`.
 Configure provider delivery receipts to `POST /api/v1/business-tools/webhooks/messaging/<provider>/` with either `Authorization: Bearer $MESSAGING_WEBHOOK_SECRET`, `X-VastraBook-Webhook-Secret`, or `X-VastraBook-Signature: sha256=<hmac_sha256_raw_body>`.
 
+Public/auth surfaces are scoped-throttled in production. Tune `THROTTLE_TENANT_REGISTER`, `THROTTLE_AUTH_OTP`, `THROTTLE_AUTH_VERIFY`, `THROTTLE_DEMO_SESSION`, `THROTTLE_PAYMENT_WEBHOOK`, `THROTTLE_MESSAGING_WEBHOOK`, and `THROTTLE_PUBLIC_SHARE` for your traffic profile.
+
 ## CI/CD
 
 GitHub Actions are included:

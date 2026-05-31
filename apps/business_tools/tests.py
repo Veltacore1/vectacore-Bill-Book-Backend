@@ -1,6 +1,7 @@
 import json
 from unittest import mock
 
+from django.core.cache import cache
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -251,6 +252,30 @@ class SMSProviderBoundaryTests(APITestCase):
         self.assertFalse(MessagingDeliveryEvent.objects.filter(event_id="evt-bad-secret").exists())
         recipient.refresh_from_db()
         self.assertEqual(recipient.status, "sent")
+
+    @override_settings(
+        MESSAGING_WEBHOOK_SECRET="webhook-secret",
+        REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {"messaging_webhook": "2/minute"}},
+    )
+    def test_messaging_webhook_is_scoped_throttled(self):
+        cache.clear()
+
+        responses = [
+            self.client.post(
+                "/api/v1/business-tools/webhooks/messaging/gupshup/",
+                {"eventId": f"evt-throttle-{index}", "messageId": f"wa-throttle-{index}", "status": "delivered"},
+                format="json",
+                HTTP_X_VASTRABOOK_WEBHOOK_SECRET="bad-secret",
+            )
+            for index in range(3)
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        ])
+        self.assertFalse(MessagingDeliveryEvent.objects.filter(event_id__startswith="evt-throttle").exists())
 
     @override_settings(MESSAGING_WEBHOOK_SECRET="webhook-secret")
     def test_messaging_webhook_updates_whatsapp_reminder_failure(self):

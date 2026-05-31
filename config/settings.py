@@ -161,6 +161,15 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ),
+    "DEFAULT_THROTTLE_RATES": {
+        "tenant_register": os.getenv("THROTTLE_TENANT_REGISTER", "5/hour"),
+        "auth_otp": os.getenv("THROTTLE_AUTH_OTP", "6/minute"),
+        "auth_verify": os.getenv("THROTTLE_AUTH_VERIFY", "12/minute"),
+        "demo_session": os.getenv("THROTTLE_DEMO_SESSION", "20/minute"),
+        "payment_webhook": os.getenv("THROTTLE_PAYMENT_WEBHOOK", "120/minute"),
+        "messaging_webhook": os.getenv("THROTTLE_MESSAGING_WEBHOOK", "240/minute"),
+        "public_share": os.getenv("THROTTLE_PUBLIC_SHARE", "120/minute"),
+    },
 }
 
 # Local demo session used by the React app to obtain a JWT for the seeded tenant.

@@ -16,6 +16,7 @@ from .serializers import (
     VerifyOTPSerializer, AddUserSerializer, ActivityLogSerializer,
     TextileTenantRegistrationSerializer
 )
+from .throttles import TenantScopedRateThrottle
 
 PROFILE_MUTABLE_FIELDS = {"first_name", "last_name", "email"}
 
@@ -312,6 +313,8 @@ class HealthCheckView(views.APIView):
 
 class TextileTenantRegistrationView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "tenant_register"
 
     @transaction.atomic
     def post(self, request):
@@ -388,6 +391,8 @@ class TextileTenantRegistrationView(views.APIView):
 
 class SendOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "auth_otp"
 
     def post(self, request):
         serializer = SendOTPSerializer(data=request.data)
@@ -445,6 +450,8 @@ class SendOTPView(views.APIView):
 
 class VerifyOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "auth_verify"
 
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
@@ -494,6 +501,8 @@ class VerifyOTPView(views.APIView):
 
 class DemoSessionView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "demo_session"
 
     def post(self, request):
         if not settings.DEBUG and not settings.DEMO_SESSION_ENABLED:

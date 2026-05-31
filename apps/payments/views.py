@@ -6,6 +6,7 @@ from django.http import HttpResponse
 from rest_framework import viewsets, permissions, status, views
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from apps.accounts.throttles import TenantScopedRateThrottle
 from django.db import transaction
 from django.utils import timezone
 from .gateway import (
@@ -425,6 +426,8 @@ class PaymentGatewayOrderViewSet(viewsets.ModelViewSet):
 class RazorpayWebhookView(views.APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "payment_webhook"
 
     def post(self, request):
         raw_body = request.body

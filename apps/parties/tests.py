@@ -1,3 +1,5 @@
+from django.core.cache import cache
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -81,6 +83,28 @@ class PartiesSharedLedgerTests(APITestCase):
 
         missing_response = self.client.get("/api/v1/parties/shared-ledger/not-a-real-token/")
         self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {"public_share": "2/minute"}})
+    def test_public_shared_ledger_portal_is_throttled(self):
+        cache.clear()
+        business = Business.objects.create(name="Shared Throttle Tenant", phone="9100000003")
+        customer = Party.objects.create(
+            business=business,
+            name="PUBLIC CUSTOMER",
+            party_type="customer",
+            shared_ledger_token="share-throttle-token",
+        )
+
+        responses = [
+            self.client.get(f"/api/v1/parties/shared-ledger/{customer.shared_ledger_token}/")
+            for _ in range(3)
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [
+            status.HTTP_200_OK,
+            status.HTTP_200_OK,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        ])
 
     def test_delete_party_soft_deletes_inside_active_tenant(self):
         business = Business.objects.create(name="Delete Tenant", phone="9100000010")

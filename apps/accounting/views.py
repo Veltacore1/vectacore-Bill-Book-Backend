@@ -15,6 +15,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.accounts.activity import write_activity
 from apps.accounts.email_delivery import EmailDeliveryResult, is_email_recipient, send_email
+from apps.accounts.throttles import TenantScopedRateThrottle
 from .models import BankAccount, BankTransaction, Expense, AutomatedBill, ReportShare
 from .serializers import (
     BankAccountSerializer, BankTransactionSerializer, 
@@ -1460,6 +1461,8 @@ class ReportShareView(ReportsView):
 
 class SharedReportView(ReportsView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "public_share"
 
     class _SharedRequest:
         def __init__(self, business, query_params):

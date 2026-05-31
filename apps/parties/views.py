@@ -2,6 +2,7 @@ import uuid
 from rest_framework import viewsets, permissions, status, views
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from apps.accounts.throttles import TenantScopedRateThrottle
 from .models import PartyCategory, Party
 from .serializers import PartyCategorySerializer, PartySerializer
 
@@ -202,6 +203,8 @@ class PartyViewSet(viewsets.ModelViewSet):
 
 class SharedLedgerPortalView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "public_share"
 
     def get(self, request, token):
         try:
