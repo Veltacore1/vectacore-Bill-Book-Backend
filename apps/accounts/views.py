@@ -46,29 +46,71 @@ def _business_payload(business):
 
 
 def _external_provider_payload():
-    def status_for(provider, api_url, token):
+    def base_status(provider, *, required=None, development=False, supported=None):
         provider = (provider or "disabled").strip().lower()
         if provider in {"local_stub", "demo", "stub"}:
-            return {"provider": provider, "mode": "development", "configured": True}
+            return {"provider": provider, "mode": "development", "configured": development, "missing": []}
         if provider in {"disabled", ""}:
-            return {"provider": "disabled", "mode": "disabled", "configured": False}
+            return {"provider": "disabled", "mode": "disabled", "configured": False, "missing": []}
+        if supported and provider not in supported:
+            return {"provider": provider, "mode": "unsupported", "configured": False, "missing": []}
+        missing = [name for name, value in (required or []) if not value]
         return {
             "provider": provider,
             "mode": "production",
-            "configured": bool(api_url and token),
+            "configured": not missing,
+            "missing": missing,
         }
 
     return {
-        "eInvoice": status_for(settings.E_INVOICE_PROVIDER, settings.E_INVOICE_API_URL, settings.E_INVOICE_API_TOKEN),
-        "sms": status_for(settings.SMS_PROVIDER, settings.SMS_PROVIDER_API_URL, settings.SMS_PROVIDER_API_TOKEN),
-        "email": {
-            "provider": settings.EMAIL_PROVIDER,
-            "mode": "development" if settings.EMAIL_PROVIDER in {"local_stub", "demo", "stub"} else ("disabled" if settings.EMAIL_PROVIDER in {"disabled", ""} else "production"),
-            "configured": bool(
-                settings.EMAIL_PROVIDER in {"local_stub", "demo", "stub"}
-                or (settings.EMAIL_PROVIDER == "resend" and settings.RESEND_API_KEY and settings.RESEND_FROM_EMAIL)
-            ),
-        },
+        "eInvoice": base_status(
+            settings.E_INVOICE_PROVIDER,
+            required=[("E_INVOICE_API_URL", settings.E_INVOICE_API_URL), ("E_INVOICE_API_TOKEN", settings.E_INVOICE_API_TOKEN)],
+            development=True,
+        ),
+        "sms": base_status(
+            settings.SMS_PROVIDER,
+            required=[("SMS_PROVIDER_API_URL", settings.SMS_PROVIDER_API_URL), ("SMS_PROVIDER_API_TOKEN", settings.SMS_PROVIDER_API_TOKEN)],
+            development=True,
+        ),
+        "email": base_status(
+            settings.EMAIL_PROVIDER,
+            required=[("RESEND_API_KEY", settings.RESEND_API_KEY), ("RESEND_FROM_EMAIL", settings.RESEND_FROM_EMAIL)],
+            development=True,
+            supported={"resend"},
+        ),
+        "paymentGateway": base_status(
+            settings.PAYMENT_GATEWAY_PROVIDER,
+            required=[
+                ("RAZORPAY_KEY_ID", settings.RAZORPAY_KEY_ID),
+                ("RAZORPAY_KEY_SECRET", settings.RAZORPAY_KEY_SECRET),
+                ("RAZORPAY_WEBHOOK_SECRET", settings.RAZORPAY_WEBHOOK_SECRET),
+            ],
+            supported={"razorpay"},
+        ),
+        "shipping": base_status(
+            settings.SHIPPING_PROVIDER,
+            required=[
+                ("SHIPROCKET_API_URL", settings.SHIPROCKET_API_URL),
+                ("SHIPROCKET_EMAIL", settings.SHIPROCKET_EMAIL),
+                ("SHIPROCKET_PASSWORD", settings.SHIPROCKET_PASSWORD),
+            ],
+            supported={"shiprocket"},
+        ),
+        "whatsapp": base_status(
+            settings.WHATSAPP_PROVIDER,
+            required=[
+                ("GUPSHUP_API_URL", settings.GUPSHUP_API_URL),
+                ("GUPSHUP_API_KEY", settings.GUPSHUP_API_KEY),
+                ("GUPSHUP_APP_NAME", settings.GUPSHUP_APP_NAME),
+                ("GUPSHUP_SOURCE_NUMBER", settings.GUPSHUP_SOURCE_NUMBER),
+            ] if settings.WHATSAPP_PROVIDER == "gupshup" else [
+                ("TWILIO_ACCOUNT_SID", settings.TWILIO_ACCOUNT_SID),
+                ("TWILIO_AUTH_TOKEN", settings.TWILIO_AUTH_TOKEN),
+                ("TWILIO_WHATSAPP_FROM", settings.TWILIO_WHATSAPP_FROM),
+            ],
+            supported={"gupshup", "twilio"},
+        ),
     }
 
 

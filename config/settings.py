@@ -181,6 +181,22 @@ RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails").st
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev" if DEBUG else "").strip()
 EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", "").strip()
+PAYMENT_GATEWAY_PROVIDER = os.getenv("PAYMENT_GATEWAY_PROVIDER", "disabled").strip().lower()
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
+SHIPPING_PROVIDER = os.getenv("SHIPPING_PROVIDER", "disabled").strip().lower()
+SHIPROCKET_API_URL = os.getenv("SHIPROCKET_API_URL", "https://apiv2.shiprocket.in/v1/external").strip()
+SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL", "").strip()
+SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD", "").strip()
+WHATSAPP_PROVIDER = os.getenv("WHATSAPP_PROVIDER", "disabled").strip().lower()
+GUPSHUP_API_URL = os.getenv("GUPSHUP_API_URL", "https://api.gupshup.io/wa/api/v1/msg").strip()
+GUPSHUP_API_KEY = os.getenv("GUPSHUP_API_KEY", "").strip()
+GUPSHUP_APP_NAME = os.getenv("GUPSHUP_APP_NAME", "").strip()
+GUPSHUP_SOURCE_NUMBER = os.getenv("GUPSHUP_SOURCE_NUMBER", "").strip()
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
 
 # JWT settings
 SIMPLE_JWT = {

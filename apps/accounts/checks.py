@@ -78,6 +78,86 @@ def production_safety_checks(app_configs, **kwargs):
             id="accounts.E010",
         ))
 
+    payment_gateway_provider = (getattr(settings, "PAYMENT_GATEWAY_PROVIDER", "disabled") or "disabled").strip().lower()
+    if payment_gateway_provider in {"disabled", ""}:
+        issues.append(Warning(
+            "Payment gateway is not connected; online payment links and subscription collection will stay disabled.",
+            id="accounts.W003",
+        ))
+    elif payment_gateway_provider == "razorpay":
+        missing = [
+            name
+            for name in ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET")
+            if not getattr(settings, name, "")
+        ]
+        if missing:
+            issues.append(Error(
+                f"{', '.join(missing)} are required for Razorpay payment gateway integration.",
+                id="accounts.E011",
+            ))
+    else:
+        issues.append(Error(
+            f"PAYMENT_GATEWAY_PROVIDER '{payment_gateway_provider}' is not supported.",
+            id="accounts.E012",
+        ))
+
+    shipping_provider = (getattr(settings, "SHIPPING_PROVIDER", "disabled") or "disabled").strip().lower()
+    if shipping_provider in {"disabled", ""}:
+        issues.append(Warning(
+            "Shipping provider is not connected; online order dispatch and courier tracking will stay disabled.",
+            id="accounts.W004",
+        ))
+    elif shipping_provider == "shiprocket":
+        missing = [
+            name
+            for name in ("SHIPROCKET_API_URL", "SHIPROCKET_EMAIL", "SHIPROCKET_PASSWORD")
+            if not getattr(settings, name, "")
+        ]
+        if missing:
+            issues.append(Error(
+                f"{', '.join(missing)} are required for Shiprocket shipping integration.",
+                id="accounts.E013",
+            ))
+    else:
+        issues.append(Error(
+            f"SHIPPING_PROVIDER '{shipping_provider}' is not supported.",
+            id="accounts.E014",
+        ))
+
+    whatsapp_provider = (getattr(settings, "WHATSAPP_PROVIDER", "disabled") or "disabled").strip().lower()
+    if whatsapp_provider in {"disabled", ""}:
+        issues.append(Warning(
+            "WhatsApp provider is not connected; WhatsApp reminders and order notifications will stay disabled.",
+            id="accounts.W005",
+        ))
+    elif whatsapp_provider == "gupshup":
+        missing = [
+            name
+            for name in ("GUPSHUP_API_URL", "GUPSHUP_API_KEY", "GUPSHUP_APP_NAME", "GUPSHUP_SOURCE_NUMBER")
+            if not getattr(settings, name, "")
+        ]
+        if missing:
+            issues.append(Error(
+                f"{', '.join(missing)} are required for Gupshup WhatsApp integration.",
+                id="accounts.E015",
+            ))
+    elif whatsapp_provider == "twilio":
+        missing = [
+            name
+            for name in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM")
+            if not getattr(settings, name, "")
+        ]
+        if missing:
+            issues.append(Error(
+                f"{', '.join(missing)} are required for Twilio WhatsApp integration.",
+                id="accounts.E016",
+            ))
+    else:
+        issues.append(Error(
+            f"WHATSAPP_PROVIDER '{whatsapp_provider}' is not supported.",
+            id="accounts.E017",
+        ))
+
     engine = settings.DATABASES.get("default", {}).get("ENGINE", "")
     if engine.endswith("sqlite3"):
         issues.append(Error(

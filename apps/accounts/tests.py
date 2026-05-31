@@ -204,6 +204,77 @@ class TenantOnboardingPermissionTests(APITestCase):
         }.issubset(ids))
         self.assertIn("accounts.W001", ids)
         self.assertIn("accounts.W002", ids)
+        self.assertIn("accounts.W003", ids)
+        self.assertIn("accounts.W004", ids)
+        self.assertIn("accounts.W005", ids)
+
+    @override_settings(
+        DEBUG=False,
+        SECRET_KEY="production-grade-secret-key-for-test-only",
+        ALLOWED_HOSTS=["api.vastrabook.test"],
+        CORS_ALLOW_ALL_ORIGINS=False,
+        DEMO_SESSION_ENABLED=False,
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+        E_INVOICE_PROVIDER="gst_provider",
+        E_INVOICE_API_URL="https://einvoice.example.test",
+        E_INVOICE_API_TOKEN="einvoice-token",
+        EMAIL_PROVIDER="resend",
+        RESEND_API_KEY="resend-token",
+        RESEND_FROM_EMAIL="reports@example.com",
+        PAYMENT_GATEWAY_PROVIDER="razorpay",
+        RAZORPAY_KEY_ID="rzp_test_key",
+        RAZORPAY_KEY_SECRET="razorpay-secret",
+        RAZORPAY_WEBHOOK_SECRET="razorpay-webhook-secret",
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="shiprocket-password",
+        WHATSAPP_PROVIDER="gupshup",
+        GUPSHUP_API_URL="https://gupshup.example.test",
+        GUPSHUP_API_KEY="gupshup-token",
+        GUPSHUP_APP_NAME="VastraBook",
+        GUPSHUP_SOURCE_NUMBER="919000000000",
+        DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "vastrabook_test"}},
+    )
+    def test_production_checks_accept_configured_external_providers(self):
+        messages = run_checks(tags=[Tags.security], include_deployment_checks=True)
+        account_issue_ids = {message.id for message in messages if message.id.startswith("accounts.")}
+
+        self.assertEqual(account_issue_ids, set())
+
+    @override_settings(
+        PAYMENT_GATEWAY_PROVIDER="razorpay",
+        RAZORPAY_KEY_ID="rzp_test_key",
+        RAZORPAY_KEY_SECRET="razorpay-secret",
+        RAZORPAY_WEBHOOK_SECRET="",
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="shiprocket-password",
+        WHATSAPP_PROVIDER="gupshup",
+        GUPSHUP_API_URL="https://gupshup.example.test",
+        GUPSHUP_API_KEY="gupshup-token",
+        GUPSHUP_APP_NAME="VastraBook",
+        GUPSHUP_SOURCE_NUMBER="919000000000",
+    )
+    def test_workspace_provider_status_reports_missing_config_without_leaking_secrets(self):
+        business = Business.objects.create(name="Provider Tenant", phone="9000000171")
+        admin = self.make_user(business, "9000000172", "admin", "Provider Admin")
+        self.auth_as(admin)
+
+        response = self.client.get("/api/v1/auth/workspace")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider_status = response.data["providerStatus"]
+        self.assertFalse(provider_status["paymentGateway"]["configured"])
+        self.assertEqual(provider_status["paymentGateway"]["missing"], ["RAZORPAY_WEBHOOK_SECRET"])
+        self.assertTrue(provider_status["shipping"]["configured"])
+        self.assertTrue(provider_status["whatsapp"]["configured"])
+        self.assertNotIn("razorpay-secret", str(provider_status))
+        self.assertNotIn("shiprocket-password", str(provider_status))
+        self.assertNotIn("gupshup-token", str(provider_status))
 
     def test_registration_creates_clean_tenant_without_touching_demo_data(self):
         demo_business = Business.objects.create(name="CSM SILKS", phone="8608633066")

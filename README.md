@@ -48,6 +48,31 @@ EMAIL_REPLY_TO=owner@your-domain.example
 
 Local development defaults to the `local_stub` provider. In production, Django deployment checks warn when email delivery is not connected, and fail if Resend is selected without the required key/from address.
 
+## Production Provider Boundaries
+
+Keep all third-party credentials in environment variables or deployment secrets. The workspace API returns only provider names, modes, configured flags, and missing variable names; it never returns token values.
+
+Supported production provider settings:
+
+```bash
+PAYMENT_GATEWAY_PROVIDER=razorpay
+RAZORPAY_KEY_ID=...
+RAZORPAY_KEY_SECRET=...
+RAZORPAY_WEBHOOK_SECRET=...
+
+SHIPPING_PROVIDER=shiprocket
+SHIPROCKET_API_URL=https://apiv2.shiprocket.in/v1/external
+SHIPROCKET_EMAIL=...
+SHIPROCKET_PASSWORD=...
+
+WHATSAPP_PROVIDER=gupshup # or twilio
+GUPSHUP_API_KEY=...
+GUPSHUP_APP_NAME=...
+GUPSHUP_SOURCE_NUMBER=...
+```
+
+If you use Twilio for WhatsApp, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` instead of the Gupshup variables.
+
 ## CI/CD
 
 GitHub Actions are included:
