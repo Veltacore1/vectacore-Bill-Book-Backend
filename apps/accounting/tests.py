@@ -8,12 +8,93 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
-from apps.accounting.models import Expense, ReportShare
+from apps.accounting.models import BankAccount, BankTransaction, Expense, ReportShare
 from apps.items.models import Godown, Item, StockMovement
 from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentOut
 from apps.purchases.models import PurchaseInvoice, PurchaseInvoiceItem
 from apps.sales.models import SalesInvoice, SalesInvoiceItem
+
+
+class BankTransactionLifecycleTests(APITestCase):
+    def auth_as(self, user):
+        token = RefreshToken.for_user(user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def setUp(self):
+        self.business = Business.objects.create(name="Bank Tenant", phone="9000000901")
+        self.other_business = Business.objects.create(name="Other Bank Tenant", phone="9000000902")
+        self.user = User.objects.create_user(
+            mobile="9000000903",
+            business=self.business,
+            role="admin",
+            first_name="Bank Admin",
+            is_active=True,
+        )
+        self.account = BankAccount.objects.create(
+            business=self.business,
+            account_name="Main Bank",
+            account_number="BANK-1",
+            ifsc_code="BANK0001",
+            bank_name="Primary Bank",
+            opening_balance=Decimal("1000.00"),
+            current_balance=Decimal("1000.00"),
+        )
+        self.other_account = BankAccount.objects.create(
+            business=self.other_business,
+            account_name="Other Bank",
+            account_number="BANK-2",
+            ifsc_code="BANK0002",
+            bank_name="Other Bank",
+            opening_balance=Decimal("500.00"),
+            current_balance=Decimal("500.00"),
+        )
+        self.auth_as(self.user)
+
+    def test_bank_transaction_create_update_delete_keeps_account_balance_real(self):
+        create_response = self.client.post("/api/v1/accounting/transactions/", {
+            "bank_account": str(self.account.id),
+            "transaction_type": "deposit",
+            "amount": "250.00",
+            "reference_number": "DEP-1",
+            "description": "Counter deposit",
+        }, format="json")
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("1250.00"))
+
+        patch_response = self.client.patch(f"/api/v1/accounting/transactions/{create_response.data['id']}/", {
+            "transaction_type": "withdrawal",
+            "amount": "100.00",
+            "description": "Corrected as withdrawal",
+        }, format="json")
+
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("900.00"))
+
+        delete_response = self.client.delete(f"/api/v1/accounting/transactions/{create_response.data['id']}/")
+
+        self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("1000.00"))
+        self.assertFalse(BankTransaction.objects.filter(id=create_response.data["id"]).exists())
+
+    def test_bank_transaction_rejects_cross_tenant_account_without_balance_change(self):
+        response = self.client.post("/api/v1/accounting/transactions/", {
+            "bank_account": str(self.other_account.id),
+            "transaction_type": "deposit",
+            "amount": "250.00",
+            "reference_number": "BAD-1",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.account.refresh_from_db()
+        self.other_account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("1000.00"))
+        self.assertEqual(self.other_account.current_balance, Decimal("500.00"))
+        self.assertEqual(BankTransaction.objects.filter(business=self.business).count(), 0)
 
 
 class ReportsExportTests(APITestCase):

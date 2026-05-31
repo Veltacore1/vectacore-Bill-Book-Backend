@@ -19,7 +19,7 @@ from apps.accounts.throttles import TenantScopedRateThrottle
 from .models import BankAccount, BankTransaction, Expense, AutomatedBill, ReportShare
 from .serializers import (
     BankAccountSerializer, BankTransactionSerializer, 
-    ExpenseSerializer, AutomatedBillSerializer
+    ExpenseSerializer, AutomatedBillSerializer, apply_bank_transaction_balance
 )
 from django.db.models import Sum
 
@@ -1585,6 +1585,26 @@ class BankTransactionViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(bank_account_id=bank_account)
             
         return queryset.order_by("-created_at")
+
+    def destroy(self, request, *args, **kwargs):
+        transaction_obj = self.get_object()
+        with transaction.atomic():
+            transaction_obj = BankTransaction.objects.select_for_update().get(
+                id=transaction_obj.id,
+                business=request.business,
+            )
+            account = BankAccount.objects.select_for_update().get(
+                id=transaction_obj.bank_account_id,
+                business=request.business,
+            )
+            apply_bank_transaction_balance(
+                account,
+                transaction_obj.transaction_type,
+                transaction_obj.amount,
+                reverse=True,
+            )
+            transaction_obj.delete()
+        return Response({"success": True, "message": "Bank transaction deleted and balance reversed."})
 
 class ExpenseViewSet(viewsets.ModelViewSet):
     serializer_class = ExpenseSerializer
