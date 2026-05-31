@@ -110,7 +110,7 @@ def production_safety_checks(app_configs, **kwargs):
     elif shipping_provider == "shiprocket":
         missing = [
             name
-            for name in ("SHIPROCKET_API_URL", "SHIPROCKET_EMAIL", "SHIPROCKET_PASSWORD")
+            for name in ("SHIPROCKET_API_URL", "SHIPROCKET_EMAIL", "SHIPROCKET_PASSWORD", "SHIPROCKET_PICKUP_LOCATION")
             if not getattr(settings, name, "")
         ]
         if missing:

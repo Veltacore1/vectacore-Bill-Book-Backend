@@ -24,6 +24,15 @@ class OnlineOrder(models.Model):
         ("whatsapp", "WhatsApp"),
         ("manual", "Manual Entry"),
     )
+    SHIPPING_STATUS_CHOICES = (
+        ("not_created", "Not Created"),
+        ("order_created", "Order Created"),
+        ("awb_assigned", "AWB Assigned"),
+        ("pickup_scheduled", "Pickup Scheduled"),
+        ("in_transit", "In Transit"),
+        ("delivered", "Delivered"),
+        ("failed", "Failed"),
+    )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="online_orders")
@@ -32,7 +41,11 @@ class OnlineOrder(models.Model):
     item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="online_orders")
     customer_name = models.CharField(max_length=255)
     customer_mobile = models.CharField(max_length=20, blank=True, null=True)
+    customer_email = models.EmailField(blank=True, null=True)
     delivery_address = models.TextField(blank=True, null=True)
+    delivery_city = models.CharField(max_length=100, blank=True, null=True)
+    delivery_state = models.CharField(max_length=100, blank=True, null=True)
+    delivery_pincode = models.CharField(max_length=10, blank=True, null=True)
     quantity = models.DecimalField(max_digits=15, decimal_places=3)
     unit_price = models.DecimalField(max_digits=15, decimal_places=2)
     taxable_amount = models.DecimalField(max_digits=15, decimal_places=2)
@@ -41,6 +54,18 @@ class OnlineOrder(models.Model):
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default="pending")
     dispatch_status = models.CharField(max_length=20, choices=DISPATCH_STATUS_CHOICES, default="new")
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES, default="online_store")
+    shipping_provider = models.CharField(max_length=50, blank=True, default="")
+    shipping_status = models.CharField(max_length=30, choices=SHIPPING_STATUS_CHOICES, default="not_created")
+    shiprocket_order_id = models.CharField(max_length=100, blank=True, default="")
+    shiprocket_shipment_id = models.CharField(max_length=100, blank=True, default="")
+    shiprocket_awb_code = models.CharField(max_length=100, blank=True, default="")
+    shiprocket_courier_name = models.CharField(max_length=120, blank=True, default="")
+    shipping_label_url = models.TextField(blank=True, default="")
+    tracking_url = models.TextField(blank=True, default="")
+    shipping_payload = models.JSONField(default=dict, blank=True)
+    tracking_payload = models.JSONField(default=dict, blank=True)
+    shipped_at = models.DateTimeField(blank=True, null=True)
+    delivered_at = models.DateTimeField(blank=True, null=True)
     stock_deducted = models.BooleanField(default=False)
     notes = models.TextField(blank=True, null=True)
     order_date = models.DateField(auto_now_add=True)
@@ -54,6 +79,8 @@ class OnlineOrder(models.Model):
         indexes = [
             models.Index(fields=["business", "dispatch_status", "order_date"], name="online_orde_busines_4ca9bc_idx"),
             models.Index(fields=["business", "payment_status"], name="online_orde_busines_e70e24_idx"),
+            models.Index(fields=["business", "shipping_status"], name="online_order_shipping_idx"),
+            models.Index(fields=["business", "shiprocket_awb_code"], name="online_order_awb_idx"),
         ]
 
     def __str__(self):

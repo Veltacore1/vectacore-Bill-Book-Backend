@@ -12,6 +12,15 @@ from .serializers import (
     OnlineOrderSerializer,
     sms_provider_ready,
 )
+from .shipping import (
+    ShippingConfigurationError,
+    ShippingDeliveryError,
+    ShippingOrderValidationError,
+    build_shiprocket_order_payload,
+    create_shiprocket_order,
+    shiprocket_ready,
+    sync_shiprocket_tracking,
+)
 from apps.items.models import Item, ItemGodownStock, apply_stock_movement
 
 
@@ -119,6 +128,133 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(order)
         return Response({"success": True, "message": "Online order updated", "order": serializer.data})
+
+    @action(detail=True, methods=["post"])
+    def create_shipment(self, request, pk=None):
+        order = get_object_or_404(
+            OnlineOrder.objects.select_related("business", "party", "item"),
+            id=pk,
+            business=request.business,
+        )
+        if order.dispatch_status in {"cancelled", "delivered"}:
+            return Response(
+                {"success": False, "message": "Cancelled or delivered orders cannot be shipped."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.shiprocket_order_id or order.shiprocket_shipment_id:
+            serializer = self.get_serializer(order)
+            return Response({
+                "success": True,
+                "message": "Shipment already exists for this order.",
+                "order": serializer.data,
+            })
+        try:
+            request_payload = build_shiprocket_order_payload(order)
+        except ShippingOrderValidationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ShippingConfigurationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        ready, provider, message = shiprocket_ready()
+        if not ready:
+            return Response(
+                {"success": False, "message": message or f"Shipping provider {provider} is not ready."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        with transaction.atomic():
+            order = get_object_or_404(
+                OnlineOrder.objects.select_for_update().select_related("business", "item"),
+                id=pk,
+                business=request.business,
+            )
+            if order.dispatch_status in {"cancelled", "delivered"}:
+                return Response(
+                    {"success": False, "message": "Cancelled or delivered orders cannot be shipped."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if order.shiprocket_order_id or order.shiprocket_shipment_id:
+                serializer = self.get_serializer(order)
+                return Response({
+                    "success": True,
+                    "message": "Shipment already exists for this order.",
+                    "order": serializer.data,
+                })
+            if not order.stock_deducted:
+                self._deduct_stock(order)
+            if order.dispatch_status == "new":
+                order.dispatch_status = "packed"
+            order.save(update_fields=["dispatch_status", "stock_deducted", "updated_at"])
+
+        try:
+            shipment = create_shiprocket_order(order, request_payload=request_payload)
+        except ShippingOrderValidationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ShippingConfigurationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except ShippingDeliveryError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        extracted = shipment["extracted"]
+        with transaction.atomic():
+            order = OnlineOrder.objects.select_for_update().get(id=order.id, business=request.business)
+            order.shipping_provider = "shiprocket"
+            order.shipping_status = "awb_assigned" if extracted["awb_code"] else "order_created"
+            order.shiprocket_order_id = extracted["order_id"]
+            order.shiprocket_shipment_id = extracted["shipment_id"]
+            order.shiprocket_awb_code = extracted["awb_code"]
+            order.shiprocket_courier_name = extracted["courier_name"]
+            order.shipping_label_url = extracted["label_url"]
+            order.tracking_url = extracted["tracking_url"]
+            order.shipping_payload = {
+                "request": shipment["request"],
+                "response": shipment["response"],
+                "awbResponse": shipment["awb_response"],
+            }
+            if extracted["awb_code"]:
+                order.dispatch_status = "shipped"
+                order.shipped_at = timezone.now()
+            order.save(update_fields=[
+                "shipping_provider", "shipping_status", "shiprocket_order_id",
+                "shiprocket_shipment_id", "shiprocket_awb_code", "shiprocket_courier_name",
+                "shipping_label_url", "tracking_url", "shipping_payload",
+                "dispatch_status", "shipped_at", "updated_at",
+            ])
+
+        serializer = self.get_serializer(order)
+        return Response({
+            "success": True,
+            "message": "Shiprocket shipment created.",
+            "order": serializer.data,
+        })
+
+    @action(detail=True, methods=["post"])
+    def sync_shipping(self, request, pk=None):
+        order = get_object_or_404(
+            OnlineOrder.objects.select_related("business", "party", "item"),
+            id=pk,
+            business=request.business,
+        )
+        try:
+            updates = sync_shiprocket_tracking(order)
+        except ShippingOrderValidationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ShippingConfigurationError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except ShippingDeliveryError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        with transaction.atomic():
+            order = OnlineOrder.objects.select_for_update().get(id=order.id, business=request.business)
+            for field, value in updates.items():
+                setattr(order, field, value)
+            order.save(update_fields=[*updates.keys(), "updated_at"])
+
+        serializer = self.get_serializer(order)
+        return Response({
+            "success": True,
+            "message": "Shiprocket tracking synced.",
+            "order": serializer.data,
+        })
 
 
 class SMSTemplateViewSet(viewsets.ModelViewSet):

@@ -1,10 +1,14 @@
+import json
+from unittest import mock
+
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
-from apps.business_tools.models import SMSCampaign, SMSCreditLedger, SMSTemplate
+from apps.business_tools.models import OnlineOrder, SMSCampaign, SMSCreditLedger, SMSTemplate
+from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 
 
@@ -39,6 +43,57 @@ class SMSProviderBoundaryTests(APITestCase):
         token = RefreshToken.for_user(self.user).access_token
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
+    def provider_response(self, payload, status_code=200):
+        response = mock.MagicMock()
+        response.status = status_code
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__.return_value = response
+        return response
+
+    def make_online_order(self, *, delivery_pincode="600001", dispatch_status="new", shipping_status="not_created"):
+        godown = Godown.objects.create(business=self.business, name="Main")
+        item = Item.objects.create(
+            business=self.business,
+            name="Kanjivaram Silk Saree",
+            item_code="KSS-001",
+            hsn_code="50072010",
+            selling_price=1000,
+            purchase_price=700,
+            gst_rate=5,
+            current_stock=5,
+            godown=godown,
+        )
+        ItemGodownStock.objects.create(
+            business=self.business,
+            item=item,
+            godown=godown,
+            opening_stock=5,
+            current_stock=5,
+        )
+        return OnlineOrder.objects.create(
+            business=self.business,
+            order_number="SMT/ONL/25-26/0001",
+            party=self.party,
+            item=item,
+            customer_name=self.party.name,
+            customer_mobile=self.party.mobile,
+            customer_email="customer@example.com",
+            delivery_address="12 Silk Street",
+            delivery_city="Chennai",
+            delivery_state="Tamil Nadu",
+            delivery_pincode=delivery_pincode,
+            quantity=1,
+            unit_price=1000,
+            taxable_amount=1000,
+            tax_amount=50,
+            total_amount=1050,
+            payment_status="cod",
+            dispatch_status=dispatch_status,
+            shipping_status=shipping_status,
+            source="online_store",
+            created_by=self.user,
+        )
+
     @override_settings(SMS_PROVIDER="disabled", SMS_PROVIDER_API_URL="", SMS_PROVIDER_API_TOKEN="")
     def test_send_now_requires_configured_provider(self):
         response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
@@ -51,3 +106,142 @@ class SMSProviderBoundaryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(SMSCampaign.objects.count(), 0)
+
+    @override_settings(
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="ship-password",
+        SHIPROCKET_PICKUP_LOCATION="Primary",
+        SHIPROCKET_DEFAULT_LENGTH_CM="30",
+        SHIPROCKET_DEFAULT_BREADTH_CM="24",
+        SHIPROCKET_DEFAULT_HEIGHT_CM="5",
+        SHIPROCKET_DEFAULT_WEIGHT_KG="0.5",
+    )
+    def test_create_shipment_calls_shiprocket_and_updates_order(self):
+        order = self.make_online_order()
+        auth_response = self.provider_response({"token": "ship-token"})
+        create_response = self.provider_response({
+            "order_id": 987654,
+            "shipment_id": 456789,
+            "awb_code": "AWB123456789",
+            "courier_name": "Shiprocket Surface",
+            "label_url": "https://shiprocket.example.test/label.pdf",
+            "tracking_url": "https://shiprocket.example.test/track/AWB123456789",
+        })
+
+        with mock.patch("apps.business_tools.shipping.urlopen", side_effect=[auth_response, create_response]) as provider_call:
+            response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/create_shipment/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["order"]["shipping_status"], "awb_assigned")
+        self.assertEqual(response.data["order"]["shiprocket_awb_code"], "AWB123456789")
+        self.assertEqual(response.data["order"]["dispatch_status"], "shipped")
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.shiprocket_order_id, "987654")
+        self.assertEqual(order.shiprocket_shipment_id, "456789")
+        self.assertEqual(order.item.current_stock, 4)
+        self.assertEqual(provider_call.call_count, 2)
+        create_request = provider_call.call_args_list[1].args[0]
+        payload = json.loads(create_request.data.decode("utf-8"))
+        self.assertEqual(payload["pickup_location"], "Primary")
+        self.assertEqual(payload["billing_pincode"], "600001")
+        self.assertEqual(create_request.headers.get("Authorization"), "Bearer ship-token")
+        self.assertNotIn("ship-password", str(response.data))
+
+    @override_settings(
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="ship-password",
+        SHIPROCKET_PICKUP_LOCATION="Primary",
+        SHIPROCKET_DEFAULT_LENGTH_CM="30",
+        SHIPROCKET_DEFAULT_BREADTH_CM="24",
+        SHIPROCKET_DEFAULT_HEIGHT_CM="5",
+        SHIPROCKET_DEFAULT_WEIGHT_KG="0.5",
+    )
+    def test_create_shipment_assigns_awb_when_create_order_returns_only_shipment(self):
+        order = self.make_online_order()
+        auth_response = self.provider_response({"token": "ship-token"})
+        create_response = self.provider_response({"order_id": 987654, "shipment_id": 456789})
+        awb_response = self.provider_response({
+            "awb_code": "AWB987654321",
+            "courier_name": "Delhivery Surface",
+        })
+
+        with mock.patch("apps.business_tools.shipping.urlopen", side_effect=[auth_response, create_response, awb_response]) as provider_call:
+            response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/create_shipment/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.shiprocket_awb_code, "AWB987654321")
+        self.assertEqual(order.shiprocket_courier_name, "Delhivery Surface")
+        self.assertEqual(order.dispatch_status, "shipped")
+        self.assertEqual(provider_call.call_count, 3)
+        awb_request = provider_call.call_args_list[2].args[0]
+        self.assertTrue(awb_request.full_url.endswith("/courier/assign/awb"))
+        self.assertEqual(json.loads(awb_request.data.decode("utf-8"))["shipment_id"], 456789)
+
+    @override_settings(
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="ship-password",
+        SHIPROCKET_PICKUP_LOCATION="Primary",
+    )
+    def test_create_shipment_validates_delivery_before_stock_out(self):
+        order = self.make_online_order(delivery_pincode="")
+
+        with mock.patch("apps.business_tools.shipping.urlopen") as provider_call:
+            response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/create_shipment/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("pincode", response.data["message"].lower())
+        self.assertFalse(provider_call.called)
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "new")
+        self.assertEqual(order.item.current_stock, 5)
+
+    @override_settings(SHIPPING_PROVIDER="disabled")
+    def test_create_shipment_requires_provider_before_stock_out(self):
+        order = self.make_online_order()
+
+        response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/create_shipment/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "new")
+        self.assertEqual(order.item.current_stock, 5)
+
+    @override_settings(
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="ship-password",
+        SHIPROCKET_PICKUP_LOCATION="Primary",
+    )
+    def test_sync_shipping_updates_delivered_cod_order(self):
+        order = self.make_online_order(dispatch_status="shipped", shipping_status="awb_assigned")
+        order.shipping_provider = "shiprocket"
+        order.shiprocket_awb_code = "AWB123456789"
+        order.save(update_fields=["shipping_provider", "shiprocket_awb_code"])
+        auth_response = self.provider_response({"token": "ship-token"})
+        tracking_response = self.provider_response({
+            "tracking_data": {
+                "shipment_status": "Delivered",
+                "track_url": "https://shiprocket.example.test/track/AWB123456789",
+            }
+        })
+
+        with mock.patch("apps.business_tools.shipping.urlopen", side_effect=[auth_response, tracking_response]):
+            response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/sync_shipping/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.shipping_status, "delivered")
+        self.assertEqual(order.dispatch_status, "delivered")
+        self.assertEqual(order.payment_status, "paid")
+        self.assertTrue(order.tracking_payload)

@@ -29,14 +29,19 @@ class OnlineOrderSerializer(serializers.ModelSerializer):
         model = OnlineOrder
         fields = [
             "id", "order_number", "party", "party_name", "item", "item_name", "item_code",
-            "current_stock", "customer_name", "customer_mobile", "delivery_address",
+            "current_stock", "customer_name", "customer_mobile", "customer_email", "delivery_address",
+            "delivery_city", "delivery_state", "delivery_pincode",
             "quantity", "unit_price", "taxable_amount", "tax_amount", "total_amount",
-            "payment_status", "dispatch_status", "source", "stock_deducted", "notes",
+            "payment_status", "dispatch_status", "source", "shipping_provider", "shipping_status",
+            "shiprocket_order_id", "shiprocket_shipment_id", "shiprocket_awb_code",
+            "shiprocket_courier_name", "shipping_label_url", "tracking_url", "stock_deducted", "notes",
             "order_date", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "order_number", "unit_price", "taxable_amount", "tax_amount",
-            "total_amount", "stock_deducted", "order_date", "created_by",
+            "total_amount", "shipping_provider", "shipping_status", "shiprocket_order_id",
+            "shiprocket_shipment_id", "shiprocket_awb_code", "shiprocket_courier_name",
+            "shipping_label_url", "tracking_url", "stock_deducted", "order_date", "created_by",
             "created_at", "updated_at",
         ]
 
@@ -76,6 +81,11 @@ class OnlineOrderSerializer(serializers.ModelSerializer):
         if party:
             validated_data["customer_name"] = validated_data.get("customer_name") or party.name
             validated_data["customer_mobile"] = validated_data.get("customer_mobile") or party.mobile
+            validated_data["customer_email"] = validated_data.get("customer_email") or party.email
+            validated_data["delivery_address"] = validated_data.get("delivery_address") or party.address
+            validated_data["delivery_city"] = validated_data.get("delivery_city") or party.city
+            validated_data["delivery_state"] = validated_data.get("delivery_state") or party.state
+            validated_data["delivery_pincode"] = validated_data.get("delivery_pincode") or party.pincode
 
         with transaction.atomic():
             prefix = business.invoice_prefix or "CSM"
