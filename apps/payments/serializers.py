@@ -1,8 +1,9 @@
 from rest_framework import serializers
 from django.db import transaction
-from .models import PaymentIn, PaymentInSettlement, PaymentOut, PaymentOutSettlement
+from .models import PaymentGatewayOrder, PaymentIn, PaymentInSettlement, PaymentOut, PaymentOutSettlement
 from apps.sales.models import SalesInvoice
 from apps.purchases.models import PurchaseInvoice
+from apps.parties.models import Party
 from decimal import Decimal
 
 
@@ -316,6 +317,41 @@ class PaymentOutSerializer(serializers.ModelSerializer):
             _apply_payment_out_settlements(payment, settlement_allocations)
                 
             return payment
+
+
+class PaymentGatewayOrderSerializer(serializers.ModelSerializer):
+    party_name = serializers.CharField(source="party.name", read_only=True)
+    invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
+    payment_number = serializers.CharField(source="payment_in.payment_number", read_only=True)
+
+    class Meta:
+        model = PaymentGatewayOrder
+        fields = [
+            "id", "provider", "provider_order_id", "provider_payment_id",
+            "provider_status", "receipt", "amount", "amount_subunits",
+            "currency", "status", "signature_verified", "party", "party_name",
+            "invoice", "invoice_number", "payment_in", "payment_number",
+            "notes", "created_at", "updated_at", "paid_at",
+        ]
+        read_only_fields = fields
+
+
+class PaymentGatewayOrderCreateSerializer(serializers.Serializer):
+    party = serializers.PrimaryKeyRelatedField(queryset=Party.objects.all())
+    invoice = serializers.PrimaryKeyRelatedField(queryset=SalesInvoice.objects.all(), required=False, allow_null=True)
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    notes = serializers.DictField(required=False)
+
+    def validate_amount(self, value):
+        if value <= Decimal("0.00"):
+            raise serializers.ValidationError("Payment amount must be greater than zero.")
+        return value
+
+
+class PaymentGatewayVerifySerializer(serializers.Serializer):
+    razorpay_order_id = serializers.CharField(max_length=100)
+    razorpay_payment_id = serializers.CharField(max_length=100)
+    razorpay_signature = serializers.CharField(max_length=200)
 
     def update(self, instance, validated_data):
         if instance.status == "void":

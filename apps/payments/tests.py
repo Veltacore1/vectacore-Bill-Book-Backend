@@ -1,11 +1,17 @@
+import hashlib
+import hmac
+import json
 from decimal import Decimal
+from unittest import mock
 
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import ActivityLog, Business, User
 from apps.parties.models import Party
+from apps.payments.models import PaymentGatewayEvent, PaymentGatewayOrder, PaymentIn
 from apps.purchases.models import PurchaseInvoice
 from apps.sales.models import SalesInvoice
 
@@ -207,3 +213,195 @@ class PaymentReceiptLifecycleTests(APITestCase):
         void_text = self.client.get(f"/api/v1/payments/payment-out/{payment_id}/receipt/?export_format=text")
         self.assertIn("Status: Void", void_text.content.decode("utf-8"))
         self.assertIn("Wrong supplier payment", void_text.content.decode("utf-8"))
+
+
+class RazorpayGatewayLifecycleTests(APITestCase):
+    def auth_as(self, user):
+        token = RefreshToken.for_user(user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def setUp(self):
+        self.business = Business.objects.create(name="CSM SILKS", phone="8608633066", invoice_prefix="CSM")
+        self.user = User.objects.create_user(
+            mobile="8608633066",
+            business=self.business,
+            role="admin",
+            first_name="CSM",
+            is_active=True,
+        )
+        self.customer = Party.objects.create(business=self.business, name="AARTHI", party_type="customer")
+        self.invoice = SalesInvoice.objects.create(
+            business=self.business,
+            invoice_number="CSM/26-27/2001",
+            party=self.customer,
+            subtotal=Decimal("1250.00"),
+            taxable_amount=Decimal("1250.00"),
+            total_amount=Decimal("1250.00"),
+            paid_amount=Decimal("0.00"),
+            status="unpaid",
+        )
+
+    def gateway_settings(self):
+        return override_settings(
+            PAYMENT_GATEWAY_PROVIDER="razorpay",
+            RAZORPAY_API_URL="https://api.razorpay.test/v1",
+            RAZORPAY_KEY_ID="rzp_test_unit",
+            RAZORPAY_KEY_SECRET="razorpay-secret",
+            RAZORPAY_WEBHOOK_SECRET="webhook-secret",
+        )
+
+    def provider_response(self, payload):
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__.return_value = response
+        return response
+
+    @staticmethod
+    def checkout_signature(order_id, payment_id, secret="razorpay-secret"):
+        return hmac.new(secret.encode("utf-8"), f"{order_id}|{payment_id}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def webhook_signature(raw_body, secret="webhook-secret"):
+        return hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+
+    def test_gateway_order_creation_calls_razorpay_without_leaking_secret(self):
+        self.auth_as(self.user)
+        provider_payload = {
+            "id": "order_unit_001",
+            "amount": 125000,
+            "currency": "INR",
+            "receipt": "CSM-RZP-001",
+            "status": "created",
+        }
+
+        with self.gateway_settings(), mock.patch("apps.payments.gateway.urlopen", return_value=self.provider_response(provider_payload)) as provider_call:
+            response = self.client.post("/api/v1/payments/gateway/orders/", {
+                "party": str(self.customer.id),
+                "invoice": str(self.invoice.id),
+                "amount": "1250.00",
+                "notes": {"channel": "invoice-share"},
+            }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order = PaymentGatewayOrder.objects.get(provider_order_id="order_unit_001")
+        self.assertEqual(order.amount_subunits, 125000)
+        self.assertEqual(order.status, "created")
+        request = provider_call.call_args.args[0]
+        self.assertIn("Basic ", request.headers["Authorization"])
+        self.assertNotIn("razorpay-secret", str(response.data))
+        self.assertEqual(response.data["order"]["provider_order_id"], "order_unit_001")
+        self.assertEqual(response.data["checkout"]["keyId"], "rzp_test_unit")
+        self.assertNotIn("webhook-secret", str(response.data))
+
+    def test_checkout_verify_marks_order_paid_once_and_creates_payment_in(self):
+        self.auth_as(self.user)
+        order = PaymentGatewayOrder.objects.create(
+            business=self.business,
+            party=self.customer,
+            invoice=self.invoice,
+            provider_order_id="order_unit_verify",
+            receipt="CSM-RZP-VERIFY",
+            amount=Decimal("1250.00"),
+            amount_subunits=125000,
+            created_by=self.user,
+        )
+        payload = {
+            "razorpay_order_id": "order_unit_verify",
+            "razorpay_payment_id": "pay_unit_verify",
+            "razorpay_signature": self.checkout_signature("order_unit_verify", "pay_unit_verify"),
+        }
+
+        with self.gateway_settings():
+            response = self.client.post(f"/api/v1/payments/gateway/orders/{order.id}/verify/", payload, format="json")
+            duplicate_response = self.client.post(f"/api/v1/payments/gateway/orders/{order.id}/verify/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["createdPayment"])
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(duplicate_response.data["createdPayment"])
+        self.assertEqual(PaymentIn.objects.filter(reference_number="pay_unit_verify").count(), 1)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.paid_amount, Decimal("1250.00"))
+        self.assertEqual(self.invoice.status, "paid")
+        order.refresh_from_db()
+        self.assertEqual(order.status, "paid")
+        self.assertTrue(order.signature_verified)
+
+    def test_webhook_signature_is_idempotent_and_creates_payment(self):
+        order = PaymentGatewayOrder.objects.create(
+            business=self.business,
+            party=self.customer,
+            invoice=self.invoice,
+            provider_order_id="order_unit_webhook",
+            receipt="CSM-RZP-WEBHOOK",
+            amount=Decimal("1250.00"),
+            amount_subunits=125000,
+            created_by=self.user,
+        )
+        body = json.dumps({
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_unit_webhook",
+                        "order_id": "order_unit_webhook",
+                    }
+                }
+            }
+        }).encode("utf-8")
+        signature = self.webhook_signature(body)
+
+        with self.gateway_settings():
+            response = self.client.post(
+                "/api/v1/payments/webhooks/razorpay/",
+                body,
+                content_type="application/json",
+                HTTP_X_RAZORPAY_SIGNATURE=signature,
+                HTTP_X_RAZORPAY_EVENT_ID="evt_unit_001",
+            )
+            duplicate_response = self.client.post(
+                "/api/v1/payments/webhooks/razorpay/",
+                body,
+                content_type="application/json",
+                HTTP_X_RAZORPAY_SIGNATURE=signature,
+                HTTP_X_RAZORPAY_EVENT_ID="evt_unit_001",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["processed"])
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(duplicate_response.data["processed"])
+        self.assertEqual(PaymentIn.objects.filter(reference_number="pay_unit_webhook").count(), 1)
+        self.assertEqual(PaymentGatewayEvent.objects.filter(event_id="evt_unit_001").count(), 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "paid")
+
+    def test_webhook_rejects_invalid_signature_without_creating_payment(self):
+        PaymentGatewayOrder.objects.create(
+            business=self.business,
+            party=self.customer,
+            invoice=self.invoice,
+            provider_order_id="order_unit_bad_webhook",
+            receipt="CSM-RZP-BADWEB",
+            amount=Decimal("1250.00"),
+            amount_subunits=125000,
+            created_by=self.user,
+        )
+        body = json.dumps({
+            "event": "payment.captured",
+            "payload": {"payment": {"entity": {"id": "pay_bad", "order_id": "order_unit_bad_webhook"}}},
+        }).encode("utf-8")
+
+        with self.gateway_settings():
+            response = self.client.post(
+                "/api/v1/payments/webhooks/razorpay/",
+                body,
+                content_type="application/json",
+                HTTP_X_RAZORPAY_SIGNATURE="bad-signature",
+                HTTP_X_RAZORPAY_EVENT_ID="evt_bad_001",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PaymentIn.objects.filter(reference_number="pay_bad").count(), 0)
+        self.assertFalse(PaymentGatewayEvent.objects.filter(event_id="evt_bad_001").exists())

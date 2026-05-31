@@ -1,13 +1,24 @@
 from decimal import Decimal
 from html import escape
+import json
+from django.conf import settings
 from django.http import HttpResponse
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, views
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
 from django.utils import timezone
-from .models import PaymentIn, PaymentOut
+from .gateway import (
+    PaymentGatewayConfigurationError,
+    PaymentGatewayDeliveryError,
+    create_gateway_order,
+    mark_gateway_order_paid,
+    process_razorpay_webhook,
+    verify_checkout_signature,
+)
+from .models import PaymentGatewayOrder, PaymentIn, PaymentOut
 from .serializers import (
+    PaymentGatewayOrderCreateSerializer, PaymentGatewayOrderSerializer, PaymentGatewayVerifySerializer,
     PaymentInSerializer, PaymentOutSerializer,
     _reverse_payment_in_settlements, _reverse_payment_out_settlements
 )
@@ -316,3 +327,123 @@ class PaymentOutViewSet(PaymentDeleteBlockedMixin, viewsets.ModelViewSet):
             amount=payment.amount_paid,
             paid_label="Paid",
         )
+
+
+class PaymentGatewayOrderViewSet(viewsets.ModelViewSet):
+    serializer_class = PaymentGatewayOrderSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        if not self.request.business:
+            return PaymentGatewayOrder.objects.none()
+        queryset = (
+            PaymentGatewayOrder.objects
+            .filter(business=self.request.business)
+            .select_related("party", "invoice", "payment_in")
+        )
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        return queryset.order_by("-created_at")
+
+    def create(self, request, *args, **kwargs):
+        serializer = PaymentGatewayOrderCreateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        try:
+            order = create_gateway_order(
+                request=request,
+                party=serializer.validated_data["party"],
+                invoice=serializer.validated_data.get("invoice"),
+                amount=serializer.validated_data["amount"],
+                notes=serializer.validated_data.get("notes") or {},
+            )
+        except PaymentGatewayConfigurationError as error:
+            return Response({"success": False, "message": str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except PaymentGatewayDeliveryError as error:
+            return Response({"success": False, "message": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        write_activity(
+            business=request.business,
+            user=request.user,
+            action="gateway_order_created",
+            entity_type="payment_gateway_order",
+            entity_id=order.id,
+            details={
+                "provider": order.provider,
+                "providerOrderId": order.provider_order_id,
+                "amount": float(order.amount),
+                "party": order.party.name,
+            },
+        )
+        output = PaymentGatewayOrderSerializer(order, context={"request": request})
+        return Response({
+            "success": True,
+            "order": output.data,
+            "checkout": {
+                "keyId": settings.RAZORPAY_KEY_ID,
+                "providerOrderId": order.provider_order_id,
+                "amountSubunits": order.amount_subunits,
+                "currency": order.currency,
+                "businessName": request.business.name,
+                "customerName": order.party.name,
+            },
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def verify(self, request, pk=None):
+        order = self.get_object()
+        serializer = PaymentGatewayVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        if payload["razorpay_order_id"] != order.provider_order_id:
+            return Response({"success": False, "message": "Order id does not match this tenant order."}, status=status.HTTP_400_BAD_REQUEST)
+        if not verify_checkout_signature(
+            order_id=payload["razorpay_order_id"],
+            payment_id=payload["razorpay_payment_id"],
+            signature=payload["razorpay_signature"],
+        ):
+            return Response({"success": False, "message": "Invalid Razorpay payment signature."}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment, created = mark_gateway_order_paid(
+            order=order,
+            payment_id=payload["razorpay_payment_id"],
+            signature_verified=True,
+            payload={"checkout": {key: payload[key] for key in ("razorpay_order_id", "razorpay_payment_id")}},
+            user=request.user,
+        )
+        order.refresh_from_db()
+        return Response({
+            "success": True,
+            "createdPayment": created,
+            "paymentId": str(payment.id),
+            "paymentNumber": payment.payment_number,
+            "order": PaymentGatewayOrderSerializer(order, context={"request": request}).data,
+        })
+
+
+class RazorpayWebhookView(views.APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        raw_body = request.body
+        signature = request.headers.get("X-Razorpay-Signature", "")
+        event_id = request.headers.get("X-Razorpay-Event-Id", "")
+        try:
+            event, processed = process_razorpay_webhook(
+                raw_body=raw_body,
+                signature=signature,
+                event_id=event_id,
+            )
+        except json.JSONDecodeError:
+            return Response({"success": False, "message": "Invalid Razorpay webhook JSON."}, status=status.HTTP_400_BAD_REQUEST)
+        except PaymentGatewayConfigurationError as error:
+            return Response({"success": False, "message": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "success": True,
+            "processed": processed,
+            "eventId": str(event.id),
+            "status": event.status,
+        })

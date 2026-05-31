@@ -107,3 +107,82 @@ class PaymentOutSettlement(models.Model):
 
     class Meta:
         db_table = "payment_out_settlements"
+
+
+class PaymentGatewayOrder(models.Model):
+    STATUS_CHOICES = (
+        ("created", "Created"),
+        ("attempted", "Attempted"),
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="payment_gateway_orders")
+    party = models.ForeignKey(Party, on_delete=models.PROTECT, related_name="payment_gateway_orders")
+    invoice = models.ForeignKey(SalesInvoice, on_delete=models.SET_NULL, null=True, blank=True, related_name="payment_gateway_orders")
+    payment_in = models.OneToOneField(PaymentIn, on_delete=models.SET_NULL, null=True, blank=True, related_name="gateway_order")
+    provider = models.CharField(max_length=50, default="razorpay")
+    provider_order_id = models.CharField(max_length=100, unique=True)
+    provider_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    provider_status = models.CharField(max_length=50, blank=True, default="")
+    receipt = models.CharField(max_length=40)
+    amount = models.DecimalField(max_digits=15, decimal_places=2)
+    amount_subunits = models.PositiveIntegerField()
+    currency = models.CharField(max_length=3, default="INR")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="created")
+    signature_verified = models.BooleanField(default=False)
+    provider_payload = models.JSONField(default=dict, blank=True)
+    notes = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_payment_gateway_orders")
+    paid_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "payment_gateway_orders"
+        constraints = [
+            models.UniqueConstraint(fields=["business", "receipt"], name="uniq_gateway_order_receipt_per_business"),
+        ]
+        indexes = [
+            models.Index(fields=["business", "status"], name="pg_order_biz_status_idx"),
+            models.Index(fields=["provider", "provider_order_id"], name="pg_order_provider_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.provider_order_id}"
+
+
+class PaymentGatewayEvent(models.Model):
+    STATUS_CHOICES = (
+        ("processed", "Processed"),
+        ("duplicate", "Duplicate"),
+        ("failed", "Failed"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.SET_NULL, null=True, blank=True, related_name="payment_gateway_events")
+    order = models.ForeignKey(PaymentGatewayOrder, on_delete=models.SET_NULL, null=True, blank=True, related_name="gateway_events")
+    provider = models.CharField(max_length=50, default="razorpay")
+    event_id = models.CharField(max_length=120)
+    event_type = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="processed")
+    signature_valid = models.BooleanField(default=False)
+    message = models.TextField(blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    processed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "payment_gateway_events"
+        constraints = [
+            models.UniqueConstraint(fields=["provider", "event_id"], name="uniq_gateway_event_per_provider"),
+        ]
+        indexes = [
+            models.Index(fields=["business", "created_at"], name="pg_event_biz_created_idx"),
+            models.Index(fields=["provider", "event_type"], name="pg_event_provider_type_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_id}"
