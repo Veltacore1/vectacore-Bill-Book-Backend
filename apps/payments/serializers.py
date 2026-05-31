@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.db import transaction
 from .models import PaymentGatewayOrder, PaymentIn, PaymentInSettlement, PaymentOut, PaymentOutSettlement
+from apps.accounts.sequences import next_model_document_number
 from apps.sales.models import SalesInvoice
 from apps.purchases.models import PurchaseInvoice
 from apps.parties.models import Party
@@ -37,20 +38,13 @@ def _reverse_payment_out_settlements(payment):
 
 
 def _next_payment_number(model, business, prefix):
-    business.__class__.objects.select_for_update().filter(id=business.id).exists()
-    last_payment = (
-        model.objects
-        .filter(business=business, payment_number__startswith=f"{prefix}-")
-        .order_by("-payment_number")
-        .first()
+    return next_model_document_number(
+        business=business,
+        sequence_key=f"{prefix.lower()}:{prefix}",
+        model=model,
+        field_name="payment_number",
+        number_prefix=f"{prefix}-",
     )
-    next_seq = 1
-    if last_payment:
-        try:
-            next_seq = int(last_payment.payment_number.split("-")[-1]) + 1
-        except (ValueError, IndexError):
-            next_seq = 1
-    return f"{prefix}-{next_seq:04d}"
 
 
 def _validate_payment_party(request, party, expected_type):

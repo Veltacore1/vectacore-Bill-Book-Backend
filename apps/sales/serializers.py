@@ -9,6 +9,7 @@ from .models import (
 from apps.items.models import Item, PriceHistory, apply_stock_movement
 from apps.payments.models import PaymentIn, PaymentInSettlement
 from apps.business_settings.models import InvoiceSettings
+from apps.accounts.sequences import next_model_document_number
 from decimal import Decimal
 
 
@@ -34,26 +35,31 @@ def _financial_year_suffix(business, invoice_date):
 def _next_invoice_number(business, invoice_settings, invoice_date):
     prefix = (invoice_settings.invoice_prefix or business.invoice_prefix or "INV").strip() or "INV"
     if invoice_settings.reset_each_year:
-        number_prefix = f"{prefix}/{_financial_year_suffix(business, invoice_date)}/"
+        year_suffix = _financial_year_suffix(business, invoice_date)
+        number_prefix = f"{prefix}/{year_suffix}/"
+        sequence_key = f"sales_invoice:{prefix}:{year_suffix}"
     else:
         number_prefix = f"{prefix}/"
+        sequence_key = f"sales_invoice:{prefix}:all"
 
-    last_invoice = (
-        SalesInvoice.objects.filter(
-            business=business,
-            invoice_number__startswith=number_prefix,
-        )
-        .order_by("-created_at")
-        .first()
+    return next_model_document_number(
+        business=business,
+        sequence_key=sequence_key,
+        model=SalesInvoice,
+        field_name="invoice_number",
+        number_prefix=number_prefix,
     )
 
-    next_seq = 1
-    if last_invoice:
-        try:
-            next_seq = int(last_invoice.invoice_number.split("/")[-1]) + 1
-        except (ValueError, IndexError):
-            next_seq = 1
-    return f"{number_prefix}{next_seq:04d}"
+
+def _next_plain_document_number(*, business, model, field_name):
+    return next_model_document_number(
+        business=business,
+        sequence_key=f"{model._meta.model_name}:{field_name}",
+        model=model,
+        field_name=field_name,
+        number_prefix="",
+        width=0,
+    )
 
 
 def _serializer_business(serializer):
@@ -247,19 +253,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             return invoice
 
     def _record_initial_payment(self, invoice, paid_amt, payment_mode, user):
-        last_payment = PaymentIn.objects.select_for_update().filter(
-            business=invoice.business
-        ).order_by("-created_at").first()
-        next_seq = 1
-        if last_payment:
-            try:
-                next_seq = int(last_payment.payment_number.split("-")[-1]) + 1
-            except (ValueError, IndexError):
-                next_seq = 1
-
         payment = PaymentIn.objects.create(
             business=invoice.business,
-            payment_number=f"PMTIN-{next_seq:04d}",
+            payment_number=next_model_document_number(
+                business=invoice.business,
+                sequence_key="pmtin:PMTIN",
+                model=PaymentIn,
+                field_name="payment_number",
+                number_prefix="PMTIN-",
+            ),
             party=invoice.party,
             amount_received=paid_amt,
             payment_mode=payment_mode,
@@ -384,16 +386,11 @@ class QuotationSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
         
         with transaction.atomic():
-            # Generate sequential quotation number
-            last_quot = Quotation.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_quot:
-                try:
-                    next_seq = int(last_quot.quotation_number) + 1
-                except ValueError:
-                    next_seq = 1
-                    
-            validated_data["quotation_number"] = str(next_seq)
+            validated_data["quotation_number"] = _next_plain_document_number(
+                business=business,
+                model=Quotation,
+                field_name="quotation_number",
+            )
             validated_data["business"] = business
             validated_data["created_by"] = request.user
             
@@ -458,16 +455,11 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
         
         with transaction.atomic():
-            # Generate sequential challan number
-            last_challan = DeliveryChallan.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_challan:
-                try:
-                    next_seq = int(last_challan.challan_number) + 1
-                except ValueError:
-                    next_seq = 1
-                    
-            validated_data["challan_number"] = str(next_seq)
+            validated_data["challan_number"] = _next_plain_document_number(
+                business=business,
+                model=DeliveryChallan,
+                field_name="challan_number",
+            )
             validated_data["business"] = business
             
             challan = DeliveryChallan.objects.create(**validated_data)
@@ -534,15 +526,11 @@ class ProformaInvoiceSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
 
         with transaction.atomic():
-            last_proforma = ProformaInvoice.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_proforma:
-                try:
-                    next_seq = int(last_proforma.proforma_number) + 1
-                except ValueError:
-                    next_seq = 1
-
-            validated_data["proforma_number"] = str(next_seq)
+            validated_data["proforma_number"] = _next_plain_document_number(
+                business=business,
+                model=ProformaInvoice,
+                field_name="proforma_number",
+            )
             validated_data["business"] = business
 
             proforma = ProformaInvoice.objects.create(**validated_data)
@@ -602,15 +590,11 @@ class SalesReturnSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
 
         with transaction.atomic():
-            last_return = SalesReturn.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_return:
-                try:
-                    next_seq = int(last_return.return_number) + 1
-                except ValueError:
-                    next_seq = 1
-
-            validated_data["return_number"] = str(next_seq)
+            validated_data["return_number"] = _next_plain_document_number(
+                business=business,
+                model=SalesReturn,
+                field_name="return_number",
+            )
             validated_data["business"] = business
 
             sales_return = SalesReturn.objects.create(**validated_data)
@@ -701,15 +685,11 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         business = self.context["request"].business
         
         with transaction.atomic():
-            last_note = CreditNote.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_note:
-                try:
-                    next_seq = int(last_note.credit_note_number) + 1
-                except ValueError:
-                    next_seq = 1
-                    
-            validated_data["credit_note_number"] = str(next_seq)
+            validated_data["credit_note_number"] = _next_plain_document_number(
+                business=business,
+                model=CreditNote,
+                field_name="credit_note_number",
+            )
             validated_data["business"] = business
             
             return CreditNote.objects.create(**validated_data)

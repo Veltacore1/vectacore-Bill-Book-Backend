@@ -11,7 +11,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import ActivityLog, Business, User
 from apps.parties.models import Party
-from apps.payments.models import PaymentGatewayEvent, PaymentGatewayOrder, PaymentIn
+from apps.payments.models import PaymentGatewayEvent, PaymentGatewayOrder, PaymentIn, PaymentOut
 from apps.purchases.models import PurchaseInvoice
 from apps.sales.models import SalesInvoice
 
@@ -121,6 +121,39 @@ class PaymentReceiptLifecycleTests(APITestCase):
         self.assertEqual(self.purchase_invoice.paid_amount, Decimal("0.00"))
         self.assertEqual(second_purchase.paid_amount, Decimal("125.00"))
         self.assertEqual(str(response.data["settlements"][0]["invoice"]), str(second_purchase.id))
+
+    def test_payment_numbers_continue_from_existing_documents(self):
+        self.auth_as(self.user)
+        PaymentIn.objects.create(
+            business=self.business,
+            payment_number="PMTIN-0041",
+            party=self.customer,
+            amount_received=Decimal("1.00"),
+            payment_mode="cash",
+        )
+        PaymentOut.objects.create(
+            business=self.business,
+            payment_number="PMTOUT-0018",
+            party=self.supplier,
+            amount_paid=Decimal("1.00"),
+            payment_mode="cash",
+        )
+
+        in_response = self.client.post("/api/v1/payments/payment-in/", {
+            "party": str(self.customer.id),
+            "amount_received": "100.00",
+            "payment_mode": "cash",
+        }, format="json")
+        out_response = self.client.post("/api/v1/payments/payment-out/", {
+            "party": str(self.supplier.id),
+            "amount_paid": "100.00",
+            "payment_mode": "cash",
+        }, format="json")
+
+        self.assertEqual(in_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(out_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(in_response.data["payment_number"], "PMTIN-0042")
+        self.assertEqual(out_response.data["payment_number"], "PMTOUT-0019")
 
     def test_payment_in_receipt_html_text_and_void_are_real_tenant_data(self):
         self.auth_as(self.user)

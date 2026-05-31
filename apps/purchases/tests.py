@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -68,6 +69,11 @@ class PurchaseLifecycleAuditTests(APITestCase):
             "sort_order": 0,
         }
 
+    def _current_fy(self):
+        today = timezone.localdate()
+        start_year = today.year if today.month >= self.business.fy_start_month else today.year - 1
+        return f"{start_year % 100:02d}-{(start_year + 1) % 100:02d}"
+
     def test_purchase_invoice_cancel_reverses_stock_payments_and_audits(self):
         create_response = self.client.post("/api/v1/purchases/invoices/", {
             "party": str(self.supplier.id),
@@ -110,6 +116,43 @@ class PurchaseLifecycleAuditTests(APITestCase):
                 entity_id=invoice.id,
             ).exists()
         )
+
+    def test_purchase_invoice_and_payment_numbers_continue_from_existing_documents(self):
+        fy = self._current_fy()
+        PurchaseInvoice.objects.create(
+            business=self.business,
+            invoice_number=f"PUR/{fy}/0040",
+            supplier_invoice_number="SUP-OLD",
+            party=self.supplier,
+            subtotal=Decimal("100.00"),
+            taxable_amount=Decimal("100.00"),
+            total_amount=Decimal("100.00"),
+            paid_amount=Decimal("0.00"),
+            status="unpaid",
+        )
+        PaymentOut.objects.create(
+            business=self.business,
+            payment_number="PMTOUT-0040",
+            party=self.supplier,
+            amount_paid=Decimal("100.00"),
+            payment_mode="cash",
+        )
+
+        response = self.client.post("/api/v1/purchases/invoices/", {
+            "party": str(self.supplier.id),
+            "supplier_invoice_number": "SUP-101",
+            "subtotal": "1800.00",
+            "taxable_amount": "1800.00",
+            "total_amount": "1800.00",
+            "paid_amount": "1800.00",
+            "payment_mode": "bank",
+            "line_items": [self._line_item()],
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["invoice_number"], f"PUR/{fy}/0041")
+        payment = PaymentOut.objects.get(business=self.business, reference_number=response.data["invoice_number"])
+        self.assertEqual(payment.payment_number, "PMTOUT-0041")
 
     def test_purchase_order_convert_cancel_and_debit_note_cancel_are_audited(self):
         order_response = self.client.post("/api/v1/purchases/orders/", {

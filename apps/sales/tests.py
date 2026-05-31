@@ -1,9 +1,10 @@
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.accounts.models import ActivityLog, Business, User
+from apps.accounts.models import ActivityLog, Business, DocumentSequence, User
 from apps.business_settings.models import BusinessPreference, InvoiceSettings
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
@@ -317,6 +318,11 @@ class SalesInvoiceLifecycleTests(APITestCase):
         payload.update(overrides)
         return payload
 
+    def _current_fy(self):
+        today = timezone.localdate()
+        start_year = today.year if today.month >= self.business.fy_start_month else today.year - 1
+        return f"{start_year % 100:02d}-{(start_year + 1) % 100:02d}"
+
     def test_create_uses_server_numbering_and_real_payment_stock(self):
         response = self.client.post("/api/v1/sales/invoices/", self._invoice_payload(), format="json")
 
@@ -371,6 +377,47 @@ class SalesInvoiceLifecycleTests(APITestCase):
         self.assertEqual(str(self.item.current_stock), "10.000")
         self.assertEqual(str(other_item.current_stock), "5.000")
         self.assertEqual(SalesInvoice.objects.filter(business=self.business).count(), 0)
+
+    def test_invoice_and_initial_payment_numbers_continue_from_existing_documents(self):
+        fy = self._current_fy()
+        SalesInvoice.objects.create(
+            business=self.business,
+            invoice_number=f"SAFE/{fy}/0042",
+            party=self.party,
+            subtotal=100,
+            taxable_amount=100,
+            total_amount=100,
+            paid_amount=0,
+            status="unpaid",
+        )
+        PaymentIn.objects.create(
+            business=self.business,
+            payment_number="PMTIN-0042",
+            party=self.party,
+            amount_received=100,
+            payment_mode="cash",
+        )
+
+        response = self.client.post("/api/v1/sales/invoices/", self._invoice_payload(), format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["invoice_number"], f"SAFE/{fy}/0043")
+        payment = PaymentIn.objects.get(business=self.business, reference_number=response.data["invoice_number"])
+        self.assertEqual(payment.payment_number, "PMTIN-0043")
+        self.assertEqual(
+            DocumentSequence.objects.get(
+                business=self.business,
+                sequence_key=f"sales_invoice:SAFE:{fy}",
+            ).last_number,
+            43,
+        )
+        self.assertEqual(
+            DocumentSequence.objects.get(
+                business=self.business,
+                sequence_key="pmtin:PMTIN",
+            ).last_number,
+            43,
+        )
 
     def test_cancel_restores_stock_and_voids_initial_payment_once(self):
         create_response = self.client.post("/api/v1/sales/invoices/", self._invoice_payload(), format="json")

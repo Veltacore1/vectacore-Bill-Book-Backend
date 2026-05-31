@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.db import transaction
+from apps.accounts.sequences import next_model_document_number
 from .models import BankAccount, BankTransaction, Expense, AutomatedBill
 
 class BankAccountSerializer(serializers.ModelSerializer):
@@ -53,18 +54,13 @@ class ExpenseSerializer(serializers.ModelSerializer):
         business = request.business
         
         with transaction.atomic():
-            # Generate sequential expense number
-            last_exp = Expense.objects.filter(business=business).order_by("-created_at").first()
-            next_seq = 1
-            if last_exp:
-                try:
-                    last_seq_str = last_exp.expense_number.split("-")[-1]
-                    next_seq = int(last_seq_str) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-            exp_num = f"EXP-{next_seq:04d}"
-            
-            validated_data["expense_number"] = exp_num
+            validated_data["expense_number"] = next_model_document_number(
+                business=business,
+                sequence_key="expense:EXP",
+                model=Expense,
+                field_name="expense_number",
+                number_prefix="EXP-",
+            )
             validated_data["business"] = business
             validated_data["created_by"] = request.user
             

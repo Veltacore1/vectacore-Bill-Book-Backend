@@ -101,3 +101,25 @@ class ActivityLog(models.Model):
 
     class Meta:
         db_table = "activity_log"
+
+
+class DocumentSequence(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="document_sequences")
+    sequence_key = models.CharField(max_length=120)
+    prefix = models.CharField(max_length=80)
+    last_number = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "document_sequences"
+        constraints = [
+            models.UniqueConstraint(fields=["business", "sequence_key"], name="uniq_document_sequence_per_business"),
+        ]
+        indexes = [
+            models.Index(fields=["business", "sequence_key"], name="doc_sequence_business_key_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.business_id}:{self.sequence_key}:{self.last_number}"

@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
+from apps.accounts.sequences import next_model_document_number
 from .messaging import sms_provider_ready
 from .models import SMSCampaign, SMSCreditLedger, SMSRecipient, SMSTemplate, OnlineOrder
 from apps.parties.models import Party
@@ -13,9 +14,10 @@ def _money(value):
     return Decimal(str(value or 0)).quantize(Decimal("0.01"))
 
 
-def _financial_year():
+def _financial_year(business):
     today = timezone.localdate()
-    start_year = today.year if today.month >= 4 else today.year - 1
+    fy_start_month = int(getattr(business, "fy_start_month", 4) or 4)
+    start_year = today.year if today.month >= fy_start_month else today.year - 1
     return f"{str(start_year)[-2:]}-{str(start_year + 1)[-2:]}"
 
 
@@ -89,22 +91,17 @@ class OnlineOrderSerializer(serializers.ModelSerializer):
 
         with transaction.atomic():
             prefix = business.invoice_prefix or "CSM"
-            fy = _financial_year()
+            fy = _financial_year(business)
             order_prefix = f"{prefix}/ONL/{fy}/"
-            last_order = OnlineOrder.objects.filter(
-                business=business,
-                order_number__startswith=order_prefix,
-            ).order_by("-created_at").first()
-            next_seq = 1
-            if last_order:
-                try:
-                    next_seq = int(last_order.order_number.split("/")[-1]) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-
             validated_data["business"] = business
             validated_data["created_by"] = request.user
-            validated_data["order_number"] = f"{order_prefix}{next_seq:04d}"
+            validated_data["order_number"] = next_model_document_number(
+                business=business,
+                sequence_key=f"online_order:{prefix}:{fy}",
+                model=OnlineOrder,
+                field_name="order_number",
+                number_prefix=order_prefix,
+            )
             self._apply_amounts(validated_data)
             return OnlineOrder.objects.create(**validated_data)
 
@@ -241,22 +238,17 @@ class SMSCampaignSerializer(serializers.ModelSerializer):
 
         with transaction.atomic():
             prefix = business.invoice_prefix or "CSM"
-            fy = _financial_year()
+            fy = _financial_year(business)
             campaign_prefix = f"{prefix}/SMS/{fy}/"
-            last_campaign = SMSCampaign.objects.filter(
-                business=business,
-                campaign_number__startswith=campaign_prefix,
-            ).order_by("-created_at").first()
-            next_seq = 1
-            if last_campaign:
-                try:
-                    next_seq = int(last_campaign.campaign_number.split("/")[-1]) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-
             validated_data["business"] = business
             validated_data["created_by"] = request.user
-            validated_data["campaign_number"] = f"{campaign_prefix}{next_seq:04d}"
+            validated_data["campaign_number"] = next_model_document_number(
+                business=business,
+                sequence_key=f"sms_campaign:{prefix}:{fy}",
+                model=SMSCampaign,
+                field_name="campaign_number",
+                number_prefix=campaign_prefix,
+            )
             validated_data["recipient_count"] = len(recipients)
             validated_data["credit_cost"] = credit_cost
             validated_data["status"] = "queued" if send_now else "draft"

@@ -5,6 +5,7 @@ from .models import (
     PurchaseInvoice, PurchaseInvoiceItem, PurchaseOrder, 
     PurchaseOrderItem, PurchaseReturn, PurchaseReturnItem, DebitNote
 )
+from apps.accounts.sequences import next_model_document_number
 from apps.items.models import Item, PriceHistory, apply_stock_movement
 from apps.payments.models import PaymentOut, PaymentOutSettlement
 from decimal import Decimal
@@ -17,10 +18,23 @@ def _normalise_payment_mode(value):
     return "cash"
 
 
-def _financial_year():
-    today = timezone.localdate()
-    start_year = today.year if today.month >= 4 else today.year - 1
+def _financial_year(business=None, document_date=None):
+    date_value = document_date or timezone.localdate()
+    fy_start_month = int(getattr(business, "fy_start_month", 4) or 4)
+    start_year = date_value.year if date_value.month >= fy_start_month else date_value.year - 1
     return f"{str(start_year)[-2:]}-{str(start_year + 1)[-2:]}"
+
+
+def _next_purchase_document_number(*, business, model, field_name, prefix, document_date=None):
+    fy = _financial_year(business, document_date)
+    number_prefix = f"{prefix}/{fy}/"
+    return next_model_document_number(
+        business=business,
+        sequence_key=f"{model._meta.model_name}:{field_name}:{prefix}:{fy}",
+        model=model,
+        field_name=field_name,
+        number_prefix=number_prefix,
+    )
 
 class PurchaseInvoiceItemSerializer(serializers.ModelSerializer):
     class Meta:
@@ -50,24 +64,13 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
         payment_mode = _normalise_payment_mode(validated_data.pop("payment_mode", "cash"))
         
         with transaction.atomic():
-            # 1. Generate unique sequential invoice number
-            # Format: PUR/26-27/0001
-            year_suffix = "26-27"
-            prefix = "PUR"
-            
-            last_invoice = PurchaseInvoice.objects.filter(
-                business=business, invoice_number__startswith=f"{prefix}/{year_suffix}/"
-            ).order_by("-created_at").first()
-            
-            next_seq = 1
-            if last_invoice:
-                try:
-                    last_seq_str = last_invoice.invoice_number.split("/")[-1]
-                    next_seq = int(last_seq_str) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-                    
-            invoice_num = f"{prefix}/{year_suffix}/{next_seq:04d}"
+            invoice_num = _next_purchase_document_number(
+                business=business,
+                model=PurchaseInvoice,
+                field_name="invoice_number",
+                prefix="PUR",
+                document_date=validated_data.get("invoice_date"),
+            )
             
             # 2. Determine payment status based on paid amount
             total_amt = validated_data["total_amount"]
@@ -125,19 +128,15 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             return invoice
 
     def _record_initial_payment(self, invoice, paid_amt, payment_mode, user):
-        last_payment = PaymentOut.objects.select_for_update().filter(
-            business=invoice.business
-        ).order_by("-created_at").first()
-        next_seq = 1
-        if last_payment:
-            try:
-                next_seq = int(last_payment.payment_number.split("-")[-1]) + 1
-            except (ValueError, IndexError):
-                next_seq = 1
-
         payment = PaymentOut.objects.create(
             business=invoice.business,
-            payment_number=f"PMTOUT-{next_seq:04d}",
+            payment_number=next_model_document_number(
+                business=invoice.business,
+                sequence_key="pmtout:PMTOUT",
+                model=PaymentOut,
+                field_name="payment_number",
+                number_prefix="PMTOUT-",
+            ),
             party=invoice.party,
             amount_paid=paid_amt,
             payment_mode=payment_mode,
@@ -253,19 +252,12 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
         
         with transaction.atomic():
-            year_suffix = "26-27"
-            prefix = "PO"
-            last_order = PurchaseOrder.objects.filter(
-                business=business, order_number__startswith=f"{prefix}/{year_suffix}/"
-            ).order_by("-created_at").first()
-            next_seq = 1
-            if last_order:
-                try:
-                    next_seq = int(last_order.order_number.split("/")[-1]) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-                    
-            validated_data["order_number"] = f"{prefix}/{year_suffix}/{next_seq:04d}"
+            validated_data["order_number"] = _next_purchase_document_number(
+                business=business,
+                model=PurchaseOrder,
+                field_name="order_number",
+                prefix="PO",
+            )
             validated_data["business"] = business
             
             order = PurchaseOrder.objects.create(**validated_data)
@@ -361,22 +353,14 @@ class PurchaseReturnSerializer(serializers.ModelSerializer):
         line_items_data = validated_data.pop("line_items")
 
         with transaction.atomic():
-            fy = _financial_year()
-            prefix = f"PR/{fy}/"
-            last_return = PurchaseReturn.objects.filter(
-                business=business,
-                return_number__startswith=prefix,
-            ).order_by("-created_at").first()
-            next_seq = 1
-            if last_return:
-                try:
-                    next_seq = int(last_return.return_number.split("/")[-1]) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-
             validated_data["business"] = business
             validated_data["created_by"] = request.user
-            validated_data["return_number"] = f"{prefix}{next_seq:04d}"
+            validated_data["return_number"] = _next_purchase_document_number(
+                business=business,
+                model=PurchaseReturn,
+                field_name="return_number",
+                prefix="PR",
+            )
             validated_data["status"] = "adjusted"
             purchase_return = PurchaseReturn.objects.create(**validated_data)
 
@@ -469,19 +453,12 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         business = self.context["request"].business
         
         with transaction.atomic():
-            year_suffix = "26-27"
-            prefix = "DN"
-            last_note = DebitNote.objects.filter(
-                business=business, debit_note_number__startswith=f"{prefix}/{year_suffix}/"
-            ).order_by("-created_at").first()
-            next_seq = 1
-            if last_note:
-                try:
-                    next_seq = int(last_note.debit_note_number.split("/")[-1]) + 1
-                except (ValueError, IndexError):
-                    next_seq = 1
-                    
-            validated_data["debit_note_number"] = f"{prefix}/{year_suffix}/{next_seq:04d}"
+            validated_data["debit_note_number"] = _next_purchase_document_number(
+                business=business,
+                model=DebitNote,
+                field_name="debit_note_number",
+                prefix="DN",
+            )
             validated_data["business"] = business
             
             return DebitNote.objects.create(**validated_data)
