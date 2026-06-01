@@ -118,12 +118,11 @@ def _external_provider_payload():
     }
 
 
-def _token_payload(user):
+def _token_pair(user):
     refresh = RefreshToken.for_user(user)
     return {
         "access": str(refresh.access_token),
-        "refresh": str(refresh),
-    }
+    }, str(refresh)
 
 
 def _refresh_cookie_max_age():
@@ -155,12 +154,17 @@ def _clear_refresh_cookie(response):
     return response
 
 
-def _response_with_refresh_cookie(payload, *, status_code=status.HTTP_200_OK):
+def _response_with_refresh_cookie(payload, refresh_token, *, status_code=status.HTTP_200_OK):
     response = Response(payload, status=status_code)
-    refresh_token = payload.get("tokens", {}).get("refresh")
     if refresh_token:
         _set_refresh_cookie(response, refresh_token)
     return response
+
+
+def _session_response(payload, user, *, status_code=status.HTTP_200_OK):
+    tokens, refresh_token = _token_pair(user)
+    payload["tokens"] = tokens
+    return _response_with_refresh_cookie(payload, refresh_token, status_code=status_code)
 
 
 def _activity_time(value):
@@ -364,11 +368,10 @@ class CookieTokenRefreshView(TokenRefreshView):
 
         serializer = self.get_serializer(data=payload)
         serializer.is_valid(raise_exception=True)
-        response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+        response_payload = dict(serializer.validated_data)
         refresh_token = serializer.validated_data.get("refresh") or payload.get("refresh")
-        if refresh_token:
-            _set_refresh_cookie(response, refresh_token)
-        return response
+        response_payload.pop("refresh", None)
+        return _response_with_refresh_cookie(response_payload, refresh_token)
 
 
 class LogoutView(views.APIView):
@@ -442,12 +445,11 @@ class TextileTenantRegistrationView(views.APIView):
             },
         )
 
-        return _response_with_refresh_cookie({
+        return _session_response({
             "success": True,
             "message": "Textile tenant registered successfully",
             "business": _business_payload(business),
             "user": UserSerializer(user).data,
-            "tokens": _token_payload(user),
             "counts": {
                 "parties": 0,
                 "items": 0,
@@ -456,7 +458,7 @@ class TextileTenantRegistrationView(views.APIView):
                 "paymentsIn": 0,
                 "paymentsOut": 0,
             },
-        }, status_code=status.HTTP_201_CREATED)
+        }, user, status_code=status.HTTP_201_CREATED)
 
 class SendOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
@@ -558,11 +560,10 @@ class VerifyOTPView(views.APIView):
         user.last_login_at = timezone.now()
         user.save(update_fields=["last_login_at"])
 
-        return _response_with_refresh_cookie({
+        return _session_response({
             "success": True,
             "user": UserSerializer(user).data,
-            "tokens": _token_payload(user),
-        })
+        }, user)
 
 class DemoSessionView(views.APIView):
     permission_classes = [permissions.AllowAny]
@@ -584,12 +585,11 @@ class DemoSessionView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        return _response_with_refresh_cookie({
+        return _session_response({
             "success": True,
             "user": UserSerializer(user).data,
             "business": _business_payload(user.business),
-            "tokens": _token_payload(user),
-        })
+        }, user)
 
 class UserProfileView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]

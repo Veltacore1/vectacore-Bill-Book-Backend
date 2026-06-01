@@ -87,6 +87,9 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
         self.assertEqual(verify_response.data["user"]["mobile"], "9000000092")
         self.assertIn("access", verify_response.data["tokens"])
+        self.assertNotIn("refresh", verify_response.data["tokens"])
+        self.assertIn("vastrabook_refresh", verify_response.cookies)
+        self.assertTrue(verify_response.cookies["vastrabook_refresh"]["httponly"])
         token.refresh_from_db()
         self.assertTrue(token.used)
 
@@ -198,6 +201,8 @@ class TenantOnboardingPermissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
+        self.assertIn("vastrabook_refresh", response.cookies)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
         workspace_response = self.client.get("/api/v1/auth/workspace")
         self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
@@ -213,6 +218,7 @@ class TenantOnboardingPermissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
         self.assertIn("vastrabook_refresh", response.cookies)
         refresh_cookie = response.cookies["vastrabook_refresh"]
         self.assertTrue(refresh_cookie["httponly"])
@@ -344,6 +350,7 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn("vastrabook_refresh", response.cookies)
         self.assertTrue(response.cookies["vastrabook_refresh"]["httponly"])
+        self.assertNotIn("refresh", response.data["tokens"])
         business = Business.objects.get(name="Fresh Textile House")
         self.assertEqual(User.objects.get(mobile="9000000001").business, business)
         self.assertEqual(Party.objects.filter(business=business).count(), 0)
@@ -369,6 +376,20 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(workspace_response.data["godowns"], [])
         self.assertEqual(workspace_response.data["staff"], [])
         self.assertEqual({row["mobile"] for row in workspace_response.data["users"]}, {"9000000001"})
+
+    def test_demo_session_sets_cookie_without_returning_refresh_token(self):
+        business = Business.objects.create(name="CSM SILKS", phone="8608633066")
+        self.make_user(business, "8608633066", "admin", "CSM")
+
+        response = self.client.post("/api/v1/auth/demo-session", {
+            "mobile": "8608633066",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data["tokens"])
+        self.assertNotIn("refresh", response.data["tokens"])
+        self.assertIn("vastrabook_refresh", response.cookies)
+        self.assertTrue(response.cookies["vastrabook_refresh"]["httponly"])
 
     def test_registration_normalizes_and_rejects_duplicate_mobile(self):
         business = Business.objects.create(name="Existing Textile", phone="9000000101")

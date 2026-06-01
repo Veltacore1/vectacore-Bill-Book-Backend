@@ -35,7 +35,7 @@ SMS_PROVIDER_API_TOKEN=...
 
 When `DEBUG=False`, the local SMS stub is rejected and OTP codes are never returned in API responses. OTPs are stored as HMAC digests, expire after 10 minutes, and only existing active tenant users can receive or verify login codes.
 
-Successful login, registration, and demo-session responses also set the refresh token as an HttpOnly cookie. The React app keeps access tokens in memory and refreshes through:
+Successful login, registration, and demo-session responses set the refresh token as an HttpOnly cookie and return only the short-lived access token in JSON. The React app keeps access tokens in memory and refreshes through:
 
 ```bash
 POST /api/v1/auth/token/refresh
