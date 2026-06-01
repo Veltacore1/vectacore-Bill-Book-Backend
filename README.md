@@ -110,7 +110,7 @@ Public/auth surfaces are scoped-throttled in production. Tune `THROTTLE_TENANT_R
 
 GitHub Actions are included:
 
-- `Backend CI`: runs Django system checks, migration-drift checks, migrations, and the app test suite against a real Postgres service.
+- `Backend CI`: runs a tracked-file secret scan, Django system checks, migration-drift checks, migrations, and the app test suite against a real Postgres service.
 - `Backend Container CD`: builds and publishes a production Gunicorn image to GitHub Container Registry on `main`, tags, or manual dispatch.
 
 Published image:
