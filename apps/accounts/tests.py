@@ -15,6 +15,7 @@ from apps.accounting.models import BankAccount, Expense
 from apps.accounts.email_delivery import send_email
 from apps.accounts.models import ActivityLog, Business, OTPToken, User
 from apps.accounts.otp import otp_matches
+from deploy import smoke_check
 from apps.items.models import Item
 from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentOut
@@ -226,6 +227,48 @@ class TenantOnboardingPermissionTests(APITestCase):
     def test_integration_smoke_live_tests_require_network_opt_in(self):
         with self.assertRaises(CommandError):
             call_command("integration_smoke", "--email-to", "owner@example.com")
+
+    def test_deploy_smoke_demo_session_accepts_httponly_cookie_auth(self):
+        with mock.patch("deploy.smoke_check.request_json") as request_json:
+            request_json.return_value = (
+                200,
+                {"Set-Cookie": "vastrabook_refresh=token-value; Path=/api/v1/auth; HttpOnly; SameSite=Lax"},
+                {"success": True, "tokens": {"access": "access-token"}},
+            )
+
+            result = smoke_check.check_demo_session(
+                "https://api.example.test",
+                "/api/v1",
+                "8608633066",
+                "vastrabook_refresh",
+                10,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIn("HttpOnly refresh cookie", result.message)
+
+    def test_deploy_smoke_demo_session_rejects_refresh_json_and_redacts_tokens(self):
+        with mock.patch("deploy.smoke_check.request_json") as request_json:
+            request_json.return_value = (
+                200,
+                {},
+                {"success": True, "tokens": {"access": "secret-access", "refresh": "secret-refresh"}},
+            )
+
+            result = smoke_check.check_demo_session(
+                "https://api.example.test",
+                "/api/v1",
+                "8608633066",
+                "vastrabook_refresh",
+                10,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.details["hasAccess"])
+        self.assertTrue(result.details["hasRefreshInJson"])
+        self.assertFalse(result.details["hasRefreshCookie"])
+        self.assertEqual(result.details["body"]["tokens"]["access"], "[redacted]")
+        self.assertEqual(result.details["body"]["tokens"]["refresh"], "[redacted]")
 
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_send_does_not_create_user_or_token_for_unknown_mobile(self):

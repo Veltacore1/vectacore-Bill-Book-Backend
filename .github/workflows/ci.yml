@@ -77,6 +77,21 @@ jobs:
           E_INVOICE_PROVIDER: einvoice_gateway
           E_INVOICE_API_URL: https://einvoice.example.test
           E_INVOICE_API_TOKEN: ci-einvoice-token
+          PAYMENT_GATEWAY_PROVIDER: razorpay
+          RAZORPAY_KEY_ID: rzp_test_ci
+          RAZORPAY_KEY_SECRET: ci-razorpay-secret
+          RAZORPAY_WEBHOOK_SECRET: ci-razorpay-webhook-secret
+          SHIPPING_PROVIDER: shiprocket
+          SHIPROCKET_API_URL: https://shiprocket.example.test
+          SHIPROCKET_EMAIL: ship@example.com
+          SHIPROCKET_PASSWORD: ci-shiprocket-password
+          SHIPROCKET_PICKUP_LOCATION: Primary
+          WHATSAPP_PROVIDER: gupshup
+          GUPSHUP_API_URL: https://gupshup.example.test
+          GUPSHUP_API_KEY: ci-gupshup-token
+          GUPSHUP_APP_NAME: VastraBook
+          GUPSHUP_SOURCE_NUMBER: '919000000000'
+          MESSAGING_WEBHOOK_SECRET: ci-messaging-webhook-secret
           SECURE_SSL_REDIRECT: 'True'
           SESSION_COOKIE_SECURE: 'True'
           CSRF_COOKIE_SECURE: 'True'

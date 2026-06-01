@@ -72,7 +72,7 @@ python .\deploy\smoke_check.py `
   --frontend-url http://127.0.0.1:8080
 ```
 
-For a seeded demo deployment, also verify that the demo tenant token flow is alive:
+For a seeded demo deployment, also verify that the demo tenant secure cookie auth flow is alive:
 
 ```powershell
 python .\deploy\smoke_check.py `
@@ -81,7 +81,7 @@ python .\deploy\smoke_check.py `
   --demo-mobile 8608633066
 ```
 
-The smoke check verifies backend `/healthz`, database reachability, backend security headers, frontend app shell, frontend CSP/cache/security headers, and immutable asset caching. Use `--skip-frontend-security` only against a local Vite dev server, not a production Nginx deployment.
+The smoke check verifies backend `/healthz`, database reachability, backend security headers, frontend app shell, frontend CSP/cache/security headers, immutable asset caching, and, when `--demo-mobile` is supplied, that demo login returns only an access token in JSON while the refresh token is set as an HttpOnly cookie. Use `--skip-frontend-security` only against a local Vite dev server, not a production Nginx deployment.
 
 ## 4. Logs And Operations
 

@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8001"
 DEFAULT_FRONTEND_URL = "http://127.0.0.1:8080"
+DEFAULT_REFRESH_COOKIE_NAME = "vastrabook_refresh"
 
 
 @dataclass
@@ -34,6 +35,25 @@ def build_url(base_url: str, path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
+def headers_to_dict(headers: Any) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key, value in headers.items():
+        existing = values.get(key)
+        values[key] = f"{existing}\n{value}" if existing else value
+    return values
+
+
+def redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[redacted]" if key.lower() in {"access", "refresh", "token", "csrftoken"} else redact_sensitive(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive(item) for item in value]
+    return value
+
+
 def request_json(url: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: float = 10) -> tuple[int, dict[str, str], dict[str, Any]]:
     body = None
     headers = {"Accept": "application/json"}
@@ -44,14 +64,14 @@ def request_json(url: str, *, method: str = "GET", payload: dict[str, Any] | Non
     with urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8", errors="replace")
         data = json.loads(raw) if raw else {}
-        return response.status, dict(response.headers.items()), data
+        return response.status, headers_to_dict(response.headers), data
 
 
 def request_text(url: str, *, timeout: float = 10) -> tuple[int, dict[str, str], str]:
     request = Request(url, headers={"Accept": "text/html,application/xhtml+xml"})
     with urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8", errors="replace")
-        return response.status, dict(response.headers.items()), raw
+        return response.status, headers_to_dict(response.headers), raw
 
 
 def find_first_asset(frontend_url: str, html: str) -> str:
@@ -166,17 +186,45 @@ def check_frontend_security(frontend_url: str, headers: dict[str, str], html: st
     return SmokeResult("frontend security headers", True, "Frontend security and cache headers passed.", {"assetUrl": asset_url})
 
 
-def check_demo_session(backend_url: str, api_prefix: str, demo_mobile: str, timeout: float) -> SmokeResult:
+def check_demo_session(backend_url: str, api_prefix: str, demo_mobile: str, refresh_cookie_name: str, timeout: float) -> SmokeResult:
     url = build_url(backend_url, f"{api_prefix.rstrip('/')}/auth/demo-session")
     try:
-        status, _, data = request_json(url, method="POST", payload={"mobile": demo_mobile}, timeout=timeout)
+        status, headers, data = request_json(url, method="POST", payload={"mobile": demo_mobile}, timeout=timeout)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return SmokeResult("demo session", False, f"Demo session check failed: {exc}", {"url": url})
 
     tokens = data.get("tokens") or {}
-    if status == 200 and data.get("success") is True and tokens.get("access") and tokens.get("refresh"):
-        return SmokeResult("demo session", True, "Demo tenant session endpoint issued tokens.", {"url": url})
-    return SmokeResult("demo session", False, "Demo tenant session endpoint did not issue tokens.", {"url": url, "status": status, "body": data})
+    set_cookie = header_value(headers, "Set-Cookie")
+    has_cookie = f"{refresh_cookie_name}=" in set_cookie
+    cookie_httponly = "httponly" in set_cookie.lower()
+    if (
+        status == 200
+        and data.get("success") is True
+        and tokens.get("access")
+        and not tokens.get("refresh")
+        and has_cookie
+        and cookie_httponly
+    ):
+        return SmokeResult(
+            "demo session",
+            True,
+            "Demo tenant session returned access JSON and HttpOnly refresh cookie.",
+            {"url": url},
+        )
+    return SmokeResult(
+        "demo session",
+        False,
+        "Demo tenant session did not match secure cookie auth expectations.",
+        {
+            "url": url,
+            "status": status,
+            "hasAccess": bool(tokens.get("access")),
+            "hasRefreshInJson": bool(tokens.get("refresh")),
+            "hasRefreshCookie": has_cookie,
+            "refreshCookieHttpOnly": cookie_httponly,
+            "body": redact_sensitive(data),
+        },
+    )
 
 
 def run_smoke(args: argparse.Namespace) -> list[SmokeResult]:
@@ -188,7 +236,13 @@ def run_smoke(args: argparse.Namespace) -> list[SmokeResult]:
         results.append(check_frontend_security(args.frontend_url, frontend_headers, frontend_html, args.timeout))
 
     if args.demo_mobile:
-        results.append(check_demo_session(args.backend_url, args.api_prefix, args.demo_mobile, args.timeout))
+        results.append(check_demo_session(
+            args.backend_url,
+            args.api_prefix,
+            args.demo_mobile,
+            args.refresh_cookie_name,
+            args.timeout,
+        ))
 
     return results
 
@@ -211,6 +265,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--frontend-url", default=os.getenv("SMOKE_FRONTEND_URL", DEFAULT_FRONTEND_URL))
     parser.add_argument("--api-prefix", default=os.getenv("SMOKE_API_PREFIX", "/api/v1"))
     parser.add_argument("--demo-mobile", default=os.getenv("SMOKE_DEMO_MOBILE", ""))
+    parser.add_argument("--refresh-cookie-name", default=os.getenv("AUTH_REFRESH_COOKIE_NAME", DEFAULT_REFRESH_COOKIE_NAME))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("SMOKE_TIMEOUT", "10")))
     parser.add_argument("--skip-frontend-security", action="store_true", help="Use for Vite/dev-server smoke checks. Production should not skip this.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON results.")
