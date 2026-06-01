@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -33,6 +33,19 @@ class SmokeResult:
 
 def build_url(base_url: str, path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+
+
+def origin_from_url(value: str) -> str:
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def default_expected_api_origin() -> str:
+    return os.getenv("SMOKE_API_ORIGIN", "").strip() or origin_from_url(os.getenv("VITE_API_URL", "").strip())
 
 
 def headers_to_dict(headers: Any) -> dict[str, str]:
@@ -107,6 +120,35 @@ def require_header(headers: dict[str, str], name: str, expected: str) -> tuple[b
     return False, actual
 
 
+def csp_sources(csp: str, directive: str) -> list[str]:
+    for segment in csp.split(";"):
+        parts = segment.strip().split()
+        if parts and parts[0].lower() == directive.lower():
+            return parts[1:]
+    return []
+
+
+def validate_connect_src(csp: str, expected_api_origin: str = "") -> tuple[bool, dict[str, Any]]:
+    sources = csp_sources(csp, "connect-src")
+    details = {
+        "connectSrc": sources,
+        "expectedApiOrigin": expected_api_origin,
+    }
+    if not sources:
+        details["reason"] = "connect-src directive is missing."
+        return False, details
+    if "*" in sources or "https:" in sources or "http:" in sources:
+        details["reason"] = "connect-src allows a broad network source."
+        return False, details
+    if any(source.startswith("http://") for source in sources):
+        details["reason"] = "connect-src contains an insecure HTTP source."
+        return False, details
+    if expected_api_origin and expected_api_origin not in sources:
+        details["reason"] = "connect-src does not include the expected API origin."
+        return False, details
+    return True, details
+
+
 def check_backend_health(backend_url: str, timeout: float) -> SmokeResult:
     url = build_url(backend_url, "/healthz")
     try:
@@ -153,7 +195,7 @@ def check_frontend_shell(frontend_url: str, timeout: float) -> tuple[SmokeResult
     return SmokeResult("frontend shell", True, "Frontend app shell loaded.", {"url": frontend_url}), headers, html
 
 
-def check_frontend_security(frontend_url: str, headers: dict[str, str], html: str, timeout: float) -> SmokeResult:
+def check_frontend_security(frontend_url: str, headers: dict[str, str], html: str, timeout: float, expected_api_origin: str = "") -> SmokeResult:
     required = {
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
@@ -170,6 +212,16 @@ def check_frontend_security(frontend_url: str, headers: dict[str, str], html: st
     if missing:
         return SmokeResult("frontend security headers", False, "Frontend shell security/cache headers are missing or incorrect.", {"headers": missing})
 
+    csp = header_value(headers, "Content-Security-Policy")
+    connect_src_ok, connect_src_details = validate_connect_src(csp, expected_api_origin)
+    if not connect_src_ok:
+        return SmokeResult(
+            "frontend security headers",
+            False,
+            "Frontend CSP connect-src is not scoped to the expected API origin.",
+            connect_src_details,
+        )
+
     asset_url = find_first_asset(frontend_url, html)
     if not asset_url:
         return SmokeResult("frontend security headers", False, "Could not find a frontend asset URL to verify immutable cache headers.")
@@ -183,7 +235,10 @@ def check_frontend_security(frontend_url: str, headers: dict[str, str], html: st
     if not cache_ok:
         return SmokeResult("frontend security headers", False, "Frontend assets are not served with immutable cache headers.", {"assetUrl": asset_url, "cacheControl": cache_header})
 
-    return SmokeResult("frontend security headers", True, "Frontend security and cache headers passed.", {"assetUrl": asset_url})
+    return SmokeResult("frontend security headers", True, "Frontend security and cache headers passed.", {
+        "assetUrl": asset_url,
+        "expectedApiOrigin": expected_api_origin,
+    })
 
 
 def check_demo_session(backend_url: str, api_prefix: str, demo_mobile: str, refresh_cookie_name: str, timeout: float) -> SmokeResult:
@@ -233,7 +288,13 @@ def run_smoke(args: argparse.Namespace) -> list[SmokeResult]:
     results.append(frontend_result)
 
     if frontend_result.ok and not args.skip_frontend_security:
-        results.append(check_frontend_security(args.frontend_url, frontend_headers, frontend_html, args.timeout))
+        results.append(check_frontend_security(
+            args.frontend_url,
+            frontend_headers,
+            frontend_html,
+            args.timeout,
+            args.expected_api_origin,
+        ))
 
     if args.demo_mobile:
         results.append(check_demo_session(
@@ -264,6 +325,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--backend-url", default=os.getenv("SMOKE_BACKEND_URL", DEFAULT_BACKEND_URL))
     parser.add_argument("--frontend-url", default=os.getenv("SMOKE_FRONTEND_URL", DEFAULT_FRONTEND_URL))
     parser.add_argument("--api-prefix", default=os.getenv("SMOKE_API_PREFIX", "/api/v1"))
+    parser.add_argument("--expected-api-origin", default=default_expected_api_origin(), help="Expected frontend CSP connect-src API origin, for example https://api.vastrabook.in.")
     parser.add_argument("--demo-mobile", default=os.getenv("SMOKE_DEMO_MOBILE", ""))
     parser.add_argument("--refresh-cookie-name", default=os.getenv("AUTH_REFRESH_COOKIE_NAME", DEFAULT_REFRESH_COOKIE_NAME))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("SMOKE_TIMEOUT", "10")))

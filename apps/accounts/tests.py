@@ -37,6 +37,16 @@ class TenantOnboardingPermissionTests(APITestCase):
             is_active=True,
         )
 
+    def frontend_security_headers(self, csp):
+        return {
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+            "Content-Security-Policy": csp,
+            "Cache-Control": "no-store",
+        }
+
     def test_healthz_is_public_and_checks_database(self):
         response = self.client.get("/healthz")
 
@@ -269,6 +279,52 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertFalse(result.details["hasRefreshCookie"])
         self.assertEqual(result.details["body"]["tokens"]["access"], "[redacted]")
         self.assertEqual(result.details["body"]["tokens"]["refresh"], "[redacted]")
+
+    def test_deploy_smoke_frontend_security_accepts_scoped_csp(self):
+        csp = "default-src 'self'; connect-src 'self' https://api.example.test"
+        html = '<div id="root"></div><script type="module" src="/assets/index.js"></script>'
+
+        with mock.patch("deploy.smoke_check.request_text", return_value=(200, {"Cache-Control": "public, immutable"}, "")):
+            result = smoke_check.check_frontend_security(
+                "https://app.example.test",
+                self.frontend_security_headers(csp),
+                html,
+                10,
+                "https://api.example.test",
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.details["expectedApiOrigin"], "https://api.example.test")
+
+    def test_deploy_smoke_frontend_security_rejects_broad_connect_src(self):
+        csp = "default-src 'self'; connect-src 'self' https:"
+        html = '<div id="root"></div><script type="module" src="/assets/index.js"></script>'
+
+        result = smoke_check.check_frontend_security(
+            "https://app.example.test",
+            self.frontend_security_headers(csp),
+            html,
+            10,
+            "https://api.example.test",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.details["reason"], "connect-src allows a broad network source.")
+
+    def test_deploy_smoke_frontend_security_requires_expected_api_origin(self):
+        csp = "default-src 'self'; connect-src 'self' https://other-api.example.test"
+        html = '<div id="root"></div><script type="module" src="/assets/index.js"></script>'
+
+        result = smoke_check.check_frontend_security(
+            "https://app.example.test",
+            self.frontend_security_headers(csp),
+            html,
+            10,
+            "https://api.example.test",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.details["reason"], "connect-src does not include the expected API origin.")
 
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_send_does_not_create_user_or_token_for_unknown_mobile(self):
