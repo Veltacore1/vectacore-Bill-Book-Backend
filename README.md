@@ -41,6 +41,8 @@ Successful login, registration, and demo-session responses set the refresh token
 POST /api/v1/auth/token/refresh
 ```
 
+Cookie-backed refresh and logout require a CSRF token. Browser clients should call `GET /api/v1/auth/csrf`, keep the returned `csrfToken` in memory, and send it as `X-CSRFToken` on unsafe API requests.
+
 Configure cookie scope through `AUTH_REFRESH_COOKIE_NAME`, `AUTH_REFRESH_COOKIE_PATH`, `AUTH_REFRESH_COOKIE_SAMESITE`, and `AUTH_REFRESH_COOKIE_SECURE`. Production should keep `AUTH_REFRESH_COOKIE_SECURE=True` behind HTTPS.
 
 ## Email Delivery
@@ -89,6 +91,18 @@ MESSAGING_WEBHOOK_SECRET=...
 If you use Twilio for WhatsApp, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` instead of the Gupshup variables.
 Optionally override `TWILIO_API_URL` for test doubles; production defaults to `https://api.twilio.com`.
 Configure provider delivery receipts to `POST /api/v1/business-tools/webhooks/messaging/<provider>/` with either `Authorization: Bearer $MESSAGING_WEBHOOK_SECRET`, `X-VastraBook-Webhook-Secret`, or `X-VastraBook-Signature: sha256=<hmac_sha256_raw_body>`.
+
+Provider readiness can be checked without printing token values:
+
+```bash
+python manage.py integration_smoke --json
+```
+
+Live provider calls require an explicit network opt-in. For example, after configuring rotated Resend credentials in the environment:
+
+```bash
+python manage.py integration_smoke --allow-network --email-to owner@example.com
+```
 
 Public/auth surfaces are scoped-throttled in production. Tune `THROTTLE_TENANT_REGISTER`, `THROTTLE_AUTH_OTP`, `THROTTLE_AUTH_VERIFY`, `THROTTLE_DEMO_SESSION`, `THROTTLE_PAYMENT_WEBHOOK`, `THROTTLE_MESSAGING_WEBHOOK`, and `THROTTLE_PUBLIC_SHARE` for your traffic profile.
 

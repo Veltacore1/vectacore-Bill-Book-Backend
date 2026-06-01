@@ -1,10 +1,14 @@
+import json
+from io import StringIO
 from unittest import mock
 
 from django.core.checks import Tags, run_checks
 from django.core.cache import cache
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import override_settings
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounting.models import BankAccount, Expense
@@ -180,6 +184,49 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertIn("Bearer test-resend-token", request.headers.get("Authorization"))
         self.assertNotIn("test-resend-token", result.message)
 
+    @override_settings(
+        EMAIL_PROVIDER="resend",
+        RESEND_API_URL="https://api.resend.test/emails",
+        RESEND_API_KEY="test-resend-token",
+        RESEND_FROM_EMAIL="reports@example.com",
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+        PAYMENT_GATEWAY_PROVIDER="razorpay",
+        RAZORPAY_KEY_ID="rzp_test_key",
+        RAZORPAY_KEY_SECRET="razorpay-secret",
+        RAZORPAY_WEBHOOK_SECRET="razorpay-webhook-secret",
+        SHIPPING_PROVIDER="shiprocket",
+        SHIPROCKET_API_URL="https://shiprocket.example.test",
+        SHIPROCKET_EMAIL="ship@example.com",
+        SHIPROCKET_PASSWORD="shiprocket-password",
+        SHIPROCKET_PICKUP_LOCATION="Primary",
+        WHATSAPP_PROVIDER="gupshup",
+        GUPSHUP_API_URL="https://gupshup.example.test",
+        GUPSHUP_API_KEY="gupshup-token",
+        GUPSHUP_APP_NAME="VastraBook",
+        GUPSHUP_SOURCE_NUMBER="919000000000",
+    )
+    def test_integration_smoke_reports_readiness_without_leaking_secrets(self):
+        stdout = StringIO()
+
+        call_command("integration_smoke", "--json", stdout=stdout)
+
+        output = stdout.getvalue()
+        payload = json.loads(output)
+        self.assertTrue(payload["checks"]["email"]["ready"])
+        self.assertTrue(payload["checks"]["paymentGateway"]["ready"])
+        self.assertTrue(payload["checks"]["shipping"]["ready"])
+        self.assertTrue(payload["checks"]["whatsapp"]["ready"])
+        self.assertNotIn("test-resend-token", output)
+        self.assertNotIn("razorpay-secret", output)
+        self.assertNotIn("shiprocket-password", output)
+        self.assertNotIn("gupshup-token", output)
+
+    def test_integration_smoke_live_tests_require_network_opt_in(self):
+        with self.assertRaises(CommandError):
+            call_command("integration_smoke", "--email-to", "owner@example.com")
+
     @override_settings(DEBUG=True, SMS_PROVIDER="local_stub")
     def test_otp_send_does_not_create_user_or_token_for_unknown_mobile(self):
         response = self.client.post("/api/v1/auth/send-otp", {
@@ -224,6 +271,33 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertTrue(refresh_cookie["httponly"])
         self.assertEqual(refresh_cookie["path"], "/api/v1/auth")
 
+    def test_cookie_refresh_requires_csrf_header_when_csrf_checks_are_enforced(self):
+        business = Business.objects.create(name="CSRF Refresh Tenant", phone="9000000298")
+        user = self.make_user(business, "9000000299", "admin", "CSRF Refresh Admin")
+        refresh = RefreshToken.for_user(user)
+        client = APIClient(enforce_csrf_checks=True)
+        client.cookies["vastrabook_refresh"] = str(refresh)
+
+        missing_response = client.post("/api/v1/auth/token/refresh", {}, format="json")
+
+        self.assertEqual(missing_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("CSRF", missing_response.data["message"])
+
+        csrf_response = client.get("/api/v1/auth/csrf")
+        self.assertEqual(csrf_response.status_code, status.HTTP_200_OK)
+        csrf_token = csrf_response.data["csrfToken"]
+
+        refresh_response = client.post(
+            "/api/v1/auth/token/refresh",
+            {},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", refresh_response.data)
+        self.assertNotIn("refresh", refresh_response.data)
+
     def test_logout_clears_refresh_cookie(self):
         self.client.cookies["vastrabook_refresh"] = "stale-refresh-token"
 
@@ -233,6 +307,29 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertIn("vastrabook_refresh", response.cookies)
         self.assertEqual(response.cookies["vastrabook_refresh"].value, "")
         self.assertEqual(response.cookies["vastrabook_refresh"]["path"], "/api/v1/auth")
+
+    def test_cookie_logout_requires_csrf_header_when_csrf_checks_are_enforced(self):
+        client = APIClient(enforce_csrf_checks=True)
+        client.cookies["vastrabook_refresh"] = "stale-refresh-token"
+
+        missing_response = client.post("/api/v1/auth/logout", {}, format="json")
+
+        self.assertEqual(missing_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("CSRF", missing_response.data["message"])
+
+        csrf_response = client.get("/api/v1/auth/csrf")
+        self.assertEqual(csrf_response.status_code, status.HTTP_200_OK)
+        csrf_token = csrf_response.data["csrfToken"]
+
+        logout_response = client.post(
+            "/api/v1/auth/logout",
+            {},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(logout_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(logout_response.cookies["vastrabook_refresh"].value, "")
 
     @override_settings(
         DEBUG=False,

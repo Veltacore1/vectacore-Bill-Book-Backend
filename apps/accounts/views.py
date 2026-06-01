@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Sum
+from django.middleware.csrf import CsrfViewMiddleware, get_token
 from django.utils import timezone
 from rest_framework import status, views, viewsets, permissions
 from rest_framework.response import Response
@@ -21,6 +22,7 @@ from .serializers import (
 from .throttles import TenantScopedRateThrottle
 
 PROFILE_MUTABLE_FIELDS = {"first_name", "last_name", "email"}
+CSRF_FAILURE_MESSAGE = "CSRF verification failed. Refresh the page and try again."
 
 
 def _num(value):
@@ -165,6 +167,26 @@ def _session_response(payload, user, *, status_code=status.HTTP_200_OK):
     tokens, refresh_token = _token_pair(user)
     payload["tokens"] = tokens
     return _response_with_refresh_cookie(payload, refresh_token, status_code=status_code)
+
+
+def _csrf_probe(_request):
+    return None
+
+
+def _csrf_reject_response():
+    return Response(
+        {"success": False, "message": CSRF_FAILURE_MESSAGE},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def _enforce_csrf(request):
+    django_request = getattr(request, "_request", request)
+    middleware = CsrfViewMiddleware(lambda _request: None)
+    failure = middleware.process_view(django_request, _csrf_probe, (), {})
+    if failure is not None:
+        return _csrf_reject_response()
+    return None
 
 
 def _activity_time(value):
@@ -354,6 +376,18 @@ class HealthCheckView(views.APIView):
         })
 
 
+class CsrfTokenView(views.APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        django_request = getattr(request, "_request", request)
+        return Response({
+            "success": True,
+            "csrfToken": get_token(django_request),
+        })
+
+
 class CookieTokenRefreshView(TokenRefreshView):
     serializer_class = TokenRefreshSerializer
     authentication_classes = []
@@ -361,8 +395,12 @@ class CookieTokenRefreshView(TokenRefreshView):
 
     def post(self, request, *args, **kwargs):
         payload = request.data.copy()
+        cookie_refresh = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME)
+        if cookie_refresh:
+            csrf_failure = _enforce_csrf(request)
+            if csrf_failure is not None:
+                return csrf_failure
         if not payload.get("refresh"):
-            cookie_refresh = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME)
             if cookie_refresh:
                 payload["refresh"] = cookie_refresh
 
@@ -379,6 +417,10 @@ class LogoutView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        if request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME):
+            csrf_failure = _enforce_csrf(request)
+            if csrf_failure is not None:
+                return csrf_failure
         response = Response({"success": True, "message": "Session cleared"})
         return _clear_refresh_cookie(response)
 
