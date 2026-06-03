@@ -47,15 +47,41 @@ class VerifyOTPSerializer(serializers.Serializer):
         return cleaned
 
 class AddUserSerializer(serializers.ModelSerializer):
+    mobile = serializers.CharField(max_length=20)
+
     class Meta:
         model = User
         fields = ["first_name", "mobile", "role"]
+
+    def validate_first_name(self, value):
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise serializers.ValidationError("User name is required.")
+        return cleaned
+
+    def validate_mobile(self, value):
+        mobile = normalize_mobile(value)
+        business = self.context["request"].business
+        existing = User.objects.filter(mobile=mobile).select_related("business").first()
+        if existing:
+            if existing.business_id == getattr(business, "id", None) and not existing.is_active:
+                return mobile
+            raise serializers.ValidationError("This mobile number is already linked to a user.")
+        return mobile
 
     def create(self, validated_data):
         business = self.context["request"].business
         mobile = validated_data["mobile"]
         role = validated_data["role"]
         first_name = validated_data["first_name"]
+
+        existing = User.objects.filter(business=business, mobile=mobile, is_active=False).first()
+        if existing:
+            existing.first_name = first_name
+            existing.role = role
+            existing.is_active = True
+            existing.save(update_fields=["first_name", "role", "is_active"])
+            return existing
         
         # Create user linked to active business
         user = User.objects.create_user(

@@ -209,6 +209,54 @@ class ItemPartyPrice(models.Model):
         return f"{self.party.name} - {self.item.name}: {self.sales_price}"
 
 
+class ItemOffer(models.Model):
+    DISCOUNT_TYPE_CHOICES = (
+        ("percent", "Percentage"),
+        ("flat", "Flat Amount"),
+    )
+
+    STATUS_CHOICES = (
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("paused", "Paused"),
+        ("expired", "Expired"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="item_offers")
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="offers")
+    title = models.CharField(max_length=160)
+    discount_type = models.CharField(max_length=10, choices=DISCOUNT_TYPE_CHOICES, default="percent")
+    discount_value = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    starts_on = models.DateField(blank=True, null=True)
+    ends_on = models.DateField(blank=True, null=True)
+    channel = models.CharField(max_length=60, default="billing")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "item_offers"
+        indexes = [
+            models.Index(fields=["business", "status"]),
+            models.Index(fields=["business", "item"]),
+            models.Index(fields=["business", "starts_on", "ends_on"]),
+        ]
+
+    def __str__(self):
+        return f"{self.title} - {self.item.name}"
+
+    @property
+    def offer_price(self):
+        base_price = self.item.selling_price or Decimal("0.00")
+        discount = Decimal(str(self.discount_value or 0))
+        if self.discount_type == "flat":
+            return max(Decimal("0.00"), base_price - discount)
+        return max(Decimal("0.00"), base_price - (base_price * discount / Decimal("100")))
+
+
 BARCODE_LABEL_SIZES = {
     "50x25": {
         "id": "50x25",

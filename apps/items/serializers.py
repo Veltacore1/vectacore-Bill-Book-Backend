@@ -1,8 +1,9 @@
 from rest_framework import serializers
-from django.db import transaction
+from django.db import models, transaction
+from django.utils import timezone
 from .models import (
     ItemCategory, Godown, Item, ItemGodownStock, StockMovement,
-    GodownTransfer, PriceHistory, ItemPartyPrice, BarcodeLabel, BARCODE_LABEL_SIZES,
+    GodownTransfer, PriceHistory, ItemPartyPrice, ItemOffer, BarcodeLabel, BARCODE_LABEL_SIZES,
     apply_stock_movement, generate_barcode_svg
 )
 from decimal import Decimal
@@ -65,6 +66,7 @@ class ItemSerializer(serializers.ModelSerializer):
     godown_details = GodownSerializer(source="godown", read_only=True)
     godown_stocks = ItemGodownStockSerializer(many=True, read_only=True)
     party_prices = serializers.SerializerMethodField()
+    active_offer = serializers.SerializerMethodField()
     gst_rate = serializers.DecimalField(max_digits=5, decimal_places=2)
 
     class Meta:
@@ -77,13 +79,24 @@ class ItemSerializer(serializers.ModelSerializer):
             "godown_details", "godown_stocks", "secondary_unit", "serialisation_enabled",
             "default_discount_pct", "default_discount_type", "show_online_store",
             "color", "cin_date", "grn_date", "bill_no", "party_prices",
-            "is_active", "description", "created_at", "updated_at"
+            "active_offer", "is_active", "description", "created_at", "updated_at"
         ]
         read_only_fields = ["id", "current_stock", "created_at", "updated_at"]
 
     def get_party_prices(self, obj):
         prices = obj.party_prices.select_related("party").filter(business=obj.business).order_by("party__name")
         return ItemPartyPriceSerializer(prices, many=True).data
+
+    def get_active_offer(self, obj):
+        today = timezone.localdate()
+        offer = (
+            obj.offers.filter(business=obj.business, status="active")
+            .filter(models.Q(starts_on__isnull=True) | models.Q(starts_on__lte=today))
+            .filter(models.Q(ends_on__isnull=True) | models.Q(ends_on__gte=today))
+            .order_by("-updated_at")
+            .first()
+        )
+        return ItemOfferSerializer(offer).data if offer else None
 
     def validate_category(self, value):
         request = self.context["request"]
@@ -153,6 +166,49 @@ class ItemPartyPriceSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context["request"]
         return ItemPartyPrice.objects.create(business=request.business, **validated_data)
+
+
+class ItemOfferSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source="item.name", read_only=True)
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+    selling_price = serializers.DecimalField(source="item.selling_price", max_digits=15, decimal_places=2, read_only=True)
+    offer_price = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = ItemOffer
+        fields = [
+            "id", "item", "item_name", "item_code", "title", "discount_type",
+            "discount_value", "selling_price", "offer_price", "starts_on",
+            "ends_on", "channel", "status", "notes", "created_at", "updated_at"
+        ]
+        read_only_fields = ["id", "item_name", "item_code", "selling_price", "offer_price", "created_at", "updated_at"]
+
+    def validate_item(self, value):
+        request = self.context["request"]
+        if value.business_id != request.business.id or not value.is_active:
+            raise serializers.ValidationError("Choose an active item from the active tenant.")
+        return value
+
+    def validate_discount_value(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Discount must be greater than zero.")
+        return value
+
+    def validate(self, attrs):
+        discount_type = attrs.get("discount_type", getattr(self.instance, "discount_type", "percent"))
+        discount_value = attrs.get("discount_value", getattr(self.instance, "discount_value", Decimal("0.00")))
+        starts_on = attrs.get("starts_on", getattr(self.instance, "starts_on", None))
+        ends_on = attrs.get("ends_on", getattr(self.instance, "ends_on", None))
+
+        if discount_type == "percent" and discount_value > Decimal("100.00"):
+            raise serializers.ValidationError({"discount_value": "Percentage discount cannot exceed 100."})
+        if starts_on and ends_on and ends_on < starts_on:
+            raise serializers.ValidationError({"ends_on": "End date cannot be before start date."})
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        return ItemOffer.objects.create(business=request.business, created_by=request.user, **validated_data)
 
 class StockMovementSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source="item.name", read_only=True)

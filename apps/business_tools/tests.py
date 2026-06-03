@@ -203,6 +203,60 @@ class SMSProviderBoundaryTests(APITestCase):
         self.assertEqual(recipient.provider, "sms_gateway")
         self.assertIn("HTTP 400", recipient.error_message)
 
+    @override_settings(
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+    )
+    def test_draft_sms_campaign_can_be_queued_and_cancelled_with_credit_refund(self):
+        create_response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
+            "name": "Draft Campaign",
+            "template": str(self.template.id),
+            "audience": "all_customers",
+            "message": "Silk saree festival offer",
+            "send_now": False,
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        campaign = SMSCampaign.objects.get()
+        self.assertEqual(campaign.status, "draft")
+        self.assertEqual(SMSCreditLedger.objects.filter(entry_type="debit").count(), 0)
+
+        queue_response = self.client.post(f"/api/v1/business-tools/sms-campaigns/{campaign.id}/queue/", {}, format="json")
+        self.assertEqual(queue_response.status_code, status.HTTP_200_OK)
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, "queued")
+        self.assertIsNotNone(campaign.queued_at)
+        self.assertEqual(SMSCreditLedger.objects.filter(entry_type="debit", reference=campaign.campaign_number).count(), 1)
+
+        cancel_response = self.client.post(f"/api/v1/business-tools/sms-campaigns/{campaign.id}/cancel/", {}, format="json")
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, "cancelled")
+        self.assertIsNotNone(campaign.completed_at)
+        self.assertEqual(
+            SMSCreditLedger.objects.filter(entry_type="credit", reference=f"{campaign.campaign_number}:cancelled").count(),
+            1,
+        )
+
+    @override_settings(
+        SMS_PROVIDER="sms_gateway",
+        SMS_PROVIDER_API_URL="https://sms.example.test/send",
+        SMS_PROVIDER_API_TOKEN="sms-token",
+    )
+    def test_sms_campaign_cancel_rejects_provider_sent_campaign(self):
+        campaign, recipient = self.make_campaign_with_sent_recipient()
+        campaign.status = "queued"
+        campaign.queued_at = campaign.created_at
+        campaign.save(update_fields=["status", "queued_at", "updated_at"])
+        recipient.status = "sent"
+        recipient.save(update_fields=["status"])
+
+        response = self.client.post(f"/api/v1/business-tools/sms-campaigns/{campaign.id}/cancel/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, "queued")
+
     @override_settings(MESSAGING_WEBHOOK_SECRET="webhook-secret")
     def test_messaging_webhook_updates_sms_recipient_and_is_idempotent(self):
         campaign, recipient = self.make_campaign_with_sent_recipient()
@@ -417,6 +471,70 @@ class SMSProviderBoundaryTests(APITestCase):
         order.item.refresh_from_db()
         self.assertEqual(order.dispatch_status, "new")
         self.assertEqual(order.item.current_stock, 5)
+
+    def test_online_order_manual_lifecycle_deducts_stock_and_marks_cod_paid_on_delivery(self):
+        order = self.make_online_order()
+
+        pack_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "packed"},
+            format="json",
+        )
+        self.assertEqual(pack_response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "packed")
+        self.assertTrue(order.stock_deducted)
+        self.assertEqual(order.item.current_stock, 4)
+
+        ship_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "shipped"},
+            format="json",
+        )
+        self.assertEqual(ship_response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "shipped")
+        self.assertIsNotNone(order.shipped_at)
+
+        deliver_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "delivered"},
+            format="json",
+        )
+        self.assertEqual(deliver_response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "delivered")
+        self.assertEqual(order.payment_status, "paid")
+        self.assertIsNotNone(order.delivered_at)
+
+    def test_online_order_blocks_invalid_or_terminal_dispatch_transitions(self):
+        order = self.make_online_order()
+
+        invalid_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "delivered"},
+            format="json",
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.dispatch_status, "new")
+        self.assertFalse(order.stock_deducted)
+        self.assertEqual(order.item.current_stock, 5)
+
+        cancel_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "cancelled"},
+            format="json",
+        )
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        blocked_response = self.client.post(
+            f"/api/v1/business-tools/online-orders/{order.id}/set_status/",
+            {"dispatch_status": "packed"},
+            format="json",
+        )
+        self.assertEqual(blocked_response.status_code, status.HTTP_400_BAD_REQUEST)
 
     @override_settings(
         SHIPPING_PROVIDER="shiprocket",

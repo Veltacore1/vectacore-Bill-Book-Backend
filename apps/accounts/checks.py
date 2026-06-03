@@ -60,6 +60,18 @@ def production_safety_checks(app_configs, **kwargs):
             id="accounts.E007",
         ))
 
+    eway_provider = (getattr(settings, "E_WAY_BILL_PROVIDER", "disabled") or "disabled").strip().lower()
+    if eway_provider in {"disabled", ""}:
+        issues.append(Warning(
+            "E-way bill generation is not connected to a production provider.",
+            id="accounts.W006",
+        ))
+    elif not getattr(settings, "E_WAY_BILL_API_URL", "") or not getattr(settings, "E_WAY_BILL_API_TOKEN", ""):
+        issues.append(Error(
+            "E_WAY_BILL_API_URL and E_WAY_BILL_API_TOKEN are required for production e-way bill generation.",
+            id="accounts.E019",
+        ))
+
     email_provider = (getattr(settings, "EMAIL_PROVIDER", "disabled") or "disabled").strip().lower()
     if email_provider in {"disabled", ""} or email_provider in LOCAL_EMAIL_PROVIDERS:
         issues.append(Warning(

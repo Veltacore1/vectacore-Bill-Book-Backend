@@ -80,6 +80,9 @@ jobs:
           E_INVOICE_PROVIDER: einvoice_gateway
           E_INVOICE_API_URL: https://einvoice.example.test
           E_INVOICE_API_TOKEN: ci-einvoice-token
+          E_WAY_BILL_PROVIDER: eway_gateway
+          E_WAY_BILL_API_URL: https://eway.example.test
+          E_WAY_BILL_API_TOKEN: ci-eway-token
           PAYMENT_GATEWAY_PROVIDER: razorpay
           RAZORPAY_KEY_ID: rzp_test_ci
           RAZORPAY_KEY_SECRET: ci-razorpay-secret

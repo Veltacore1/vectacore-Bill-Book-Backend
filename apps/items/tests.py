@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
 from apps.business_settings.models import BusinessPreference
-from apps.items.models import BarcodeLabel, Godown, Item, ItemCategory, ItemGodownStock, ItemPartyPrice
+from apps.items.models import BarcodeLabel, Godown, Item, ItemCategory, ItemGodownStock, ItemOffer, ItemPartyPrice
 from apps.parties.models import Party
 
 
@@ -168,6 +168,60 @@ class ItemInventoryLifecycleTests(APITestCase):
             "sales_price": "500.00",
         }, format="json")
         self.assertEqual(foreign_party_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_item_offers_are_tenant_scoped_and_exposed_on_items(self):
+        item = Item.objects.create(
+            business=self.business,
+            name="OFFER ITEM",
+            category=self.category,
+            godown=self.godown,
+            item_code="OFF-001",
+            selling_price=Decimal("1000.00"),
+            purchase_price=Decimal("700.00"),
+        )
+        foreign_item = Item.objects.create(
+            business=self.other_business,
+            name="FOREIGN OFFER ITEM",
+            selling_price=Decimal("999.00"),
+            purchase_price=Decimal("600.00"),
+        )
+
+        self.auth_as(self.user)
+        create_response = self.client.post("/api/v1/items/offers/", {
+            "item": str(item.id),
+            "title": "Festival Silk Offer",
+            "discount_type": "percent",
+            "discount_value": "10.00",
+            "starts_on": "2026-06-01",
+            "ends_on": "2026-06-30",
+            "channel": "billing",
+            "status": "active",
+            "notes": "Counter launch offer",
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED, create_response.data)
+        self.assertEqual(ItemOffer.objects.filter(business=self.business, item=item).count(), 1)
+        self.assertEqual(Decimal(create_response.data["offer_price"]), Decimal("900.00"))
+
+        list_response = self.client.get("/api/v1/items/offers/?status=active")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+
+        item_response = self.client.get("/api/v1/items/items/")
+        self.assertEqual(item_response.status_code, status.HTTP_200_OK)
+        offer_row = next(row for row in item_response.data if row["id"] == str(item.id))
+        self.assertEqual(offer_row["active_offer"]["title"], "Festival Silk Offer")
+
+        pause_response = self.client.post(f"/api/v1/items/offers/{create_response.data['id']}/pause/")
+        self.assertEqual(pause_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(pause_response.data["offer"]["status"], "paused")
+
+        foreign_response = self.client.post("/api/v1/items/offers/", {
+            "item": str(foreign_item.id),
+            "title": "Foreign Offer",
+            "discount_type": "flat",
+            "discount_value": "20.00",
+        }, format="json")
+        self.assertEqual(foreign_response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_godown_default_summary_and_safe_delete_are_tenant_scoped(self):
         secondary = Godown.objects.create(business=self.business, name="Showroom")

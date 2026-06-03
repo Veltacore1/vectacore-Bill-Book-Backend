@@ -73,6 +73,10 @@ def _external_provider_payload():
             required=[("E_INVOICE_API_URL", settings.E_INVOICE_API_URL), ("E_INVOICE_API_TOKEN", settings.E_INVOICE_API_TOKEN)],
             development=True,
         ),
+        "eWayBill": base_status(
+            settings.E_WAY_BILL_PROVIDER,
+            required=[("E_WAY_BILL_API_URL", settings.E_WAY_BILL_API_URL), ("E_WAY_BILL_API_TOKEN", settings.E_WAY_BILL_API_TOKEN)],
+        ),
         "sms": base_status(
             settings.SMS_PROVIDER,
             required=[("SMS_PROVIDER_API_URL", settings.SMS_PROVIDER_API_URL), ("SMS_PROVIDER_API_TOKEN", settings.SMS_PROVIDER_API_TOKEN)],
@@ -677,7 +681,7 @@ class TenantWorkspaceView(views.APIView):
         from apps.staff.models import Staff, Attendance
         from apps.accounting.models import AutomatedBill, BankAccount, BankTransaction, Expense
         from apps.business_tools.models import SMSCampaign, SMSCreditLedger, SMSTemplate, OnlineOrder
-        from apps.business_settings.models import BusinessPreference, InvoiceSettings, ReminderPreference
+        from apps.business_settings.models import BusinessPreference, InvoiceSettings, Reminder, ReminderPreference
 
         parties = []
         receivable = 0.0
@@ -758,11 +762,12 @@ class TenantWorkspaceView(views.APIView):
         ]
 
         inventory_value = sum(item.current_stock * item.purchase_price for item in item_queryset)
-        low_stock_count = sum(
-            1
+        low_stock_items = [
+            item
             for item in item_queryset
             if item.low_stock_qty is not None and item.current_stock <= item.low_stock_qty
-        )
+        ]
+        low_stock_count = len(low_stock_items)
 
         party_by_id = {party["id"]: party for party in parties}
         item_by_id = {item["id"]: item for item in items}
@@ -907,8 +912,25 @@ class TenantWorkspaceView(views.APIView):
         purchase_total = purchase_queryset.aggregate(total=Sum("total_amount"))["total"] or Decimal("0")
         bank_balance = BankAccount.objects.filter(business=business, is_active=True).aggregate(total=Sum("current_balance"))["total"] or Decimal("0")
         expense_total = Expense.objects.filter(business=business).aggregate(total=Sum("total_amount"))["total"] or Decimal("0")
-        unpaid_sales = sales_queryset.filter(status__in=["unpaid", "partial"]).count()
-        unpaid_purchases = purchase_queryset.filter(status__in=["unpaid", "partial"]).count()
+        today = timezone.localdate()
+        unpaid_sales_queryset = sales_queryset.filter(status__in=["unpaid", "partial"])
+        unpaid_purchase_queryset = purchase_queryset.filter(status__in=["unpaid", "partial"])
+        unpaid_sales = unpaid_sales_queryset.count()
+        unpaid_purchases = unpaid_purchase_queryset.count()
+        overdue_sales = unpaid_sales_queryset.filter(due_date__lt=today).count()
+        overdue_purchases = unpaid_purchase_queryset.filter(due_date__lt=today).count()
+        open_quotations = Quotation.objects.filter(business=business, status="open").count()
+        open_quotation_value = Quotation.objects.filter(business=business, status="open").aggregate(total=Sum("total_amount"))["total"] or Decimal("0")
+        pending_online_orders = OnlineOrder.objects.filter(business=business).exclude(dispatch_status__in=["delivered", "cancelled"])
+        pending_online_order_count = pending_online_orders.count()
+        pending_online_order_value = pending_online_orders.aggregate(total=Sum("total_amount"))["total"] or Decimal("0")
+        due_reminders = Reminder.objects.filter(
+            business=business,
+            status="pending",
+            scheduled_at__lte=timezone.now(),
+        ).count()
+        pending_reminders = Reminder.objects.filter(business=business, status="pending").count()
+        failed_einvoices = sales_queryset.filter(einvoice_status="failed").count()
 
         max_invoice_date = sales_queryset.order_by("-invoice_date").values_list("invoice_date", flat=True).first() or timezone.localdate()
         trend_start = max_invoice_date - timedelta(days=6)
@@ -923,22 +945,37 @@ class TenantWorkspaceView(views.APIView):
                 "invoiceCount": sales_queryset.filter(invoice_date=day).count(),
             })
 
+        low_stock_preview = ", ".join(item.name for item in low_stock_items[:2])
         checklist = [
             {
                 "id": "collect",
                 "label": "Collect pending receivables",
                 "value": receivable,
                 "count": unpaid_sales,
-                "target": "parties",
+                "target": "payment-in",
                 "status": "Attention" if receivable else "Clear",
+                "priority": "high" if overdue_sales else "medium" if receivable else "low",
+                "description": (
+                    f"{overdue_sales} overdue invoice{'s' if overdue_sales != 1 else ''} need follow-up."
+                    if overdue_sales
+                    else f"{unpaid_sales} unpaid or partial invoice{'s' if unpaid_sales != 1 else ''} in this tenant."
+                ),
+                "ctaLabel": "Record payment",
             },
             {
                 "id": "pay",
                 "label": "Pay supplier dues",
                 "value": payable,
                 "count": unpaid_purchases,
-                "target": "purchases",
+                "target": "payment-out",
                 "status": "Attention" if payable else "Clear",
+                "priority": "high" if overdue_purchases else "medium" if payable else "low",
+                "description": (
+                    f"{overdue_purchases} supplier bill{'s' if overdue_purchases != 1 else ''} overdue."
+                    if overdue_purchases
+                    else f"{unpaid_purchases} purchase bill{'s' if unpaid_purchases != 1 else ''} awaiting settlement."
+                ),
+                "ctaLabel": "Record payout",
             },
             {
                 "id": "stock",
@@ -947,6 +984,63 @@ class TenantWorkspaceView(views.APIView):
                 "count": low_stock_count,
                 "target": "items",
                 "status": "Attention" if low_stock_count else "Clear",
+                "priority": "high" if low_stock_count else "low",
+                "description": (
+                    f"Restock {low_stock_preview}{' and more' if low_stock_count > 2 else ''}."
+                    if low_stock_preview
+                    else "All tracked items are above their low-stock limits."
+                ),
+                "ctaLabel": "Open items",
+            },
+            {
+                "id": "quote",
+                "label": "Convert open quotations",
+                "value": _num(open_quotation_value),
+                "count": open_quotations,
+                "target": "quotation",
+                "status": "Open" if open_quotations else "Clear",
+                "priority": "medium" if open_quotations else "low",
+                "description": f"{open_quotations} estimate{'s' if open_quotations != 1 else ''} can be followed up or converted.",
+                "ctaLabel": "View estimates",
+            },
+            {
+                "id": "online-orders",
+                "label": "Dispatch online orders",
+                "value": _num(pending_online_order_value),
+                "count": pending_online_order_count,
+                "target": "online-orders",
+                "status": "Open" if pending_online_order_count else "Clear",
+                "priority": "high" if pending_online_order_count else "low",
+                "description": f"{pending_online_order_count} order{'s' if pending_online_order_count != 1 else ''} not delivered yet.",
+                "ctaLabel": "Open orders",
+            },
+            {
+                "id": "reminders",
+                "label": "Send due reminders",
+                "value": 0,
+                "count": due_reminders or pending_reminders,
+                "target": "settings",
+                "status": "Due" if due_reminders else "Scheduled" if pending_reminders else "Clear",
+                "priority": "high" if due_reminders else "medium" if pending_reminders else "low",
+                "description": (
+                    f"{due_reminders} reminders are due for dispatch now."
+                    if due_reminders
+                    else f"{pending_reminders} reminders scheduled for later."
+                    if pending_reminders
+                    else "No reminder queue pending."
+                ),
+                "ctaLabel": "Review reminders",
+            },
+            {
+                "id": "einvoice",
+                "label": "Fix e-invoice failures",
+                "value": 0,
+                "count": failed_einvoices,
+                "target": "e-invoicing",
+                "status": "Attention" if failed_einvoices else "Clear",
+                "priority": "high" if failed_einvoices else "low",
+                "description": f"{failed_einvoices} IRN request{'s' if failed_einvoices != 1 else ''} need retry or correction.",
+                "ctaLabel": "Open e-invoicing",
             },
             {
                 "id": "expense",
@@ -954,7 +1048,10 @@ class TenantWorkspaceView(views.APIView):
                 "value": _num(expense_total),
                 "count": Expense.objects.filter(business=business).count(),
                 "target": "expenses",
-                "status": "Open",
+                "status": "Open" if expense_total else "Clear",
+                "priority": "medium" if expense_total else "low",
+                "description": "Keep expense vouchers checked before reports are shared.",
+                "ctaLabel": "Open expenses",
             },
         ]
 
@@ -1405,8 +1502,16 @@ class TenantWorkspaceView(views.APIView):
             dashboard_checklist.append(checklist[1])
         if can_view("items") or can_view("stock"):
             dashboard_checklist.append(checklist[2])
-        if can_view("accounting"):
+        if can_view("sales"):
             dashboard_checklist.append(checklist[3])
+        if can_view("business_tools"):
+            dashboard_checklist.append(checklist[4])
+        if can_view("settings"):
+            dashboard_checklist.append(checklist[5])
+        if can_view("sales"):
+            dashboard_checklist.append(checklist[6])
+        if can_view("accounting"):
+            dashboard_checklist.append(checklist[7])
         empty_sales_rows = {key: [] for key in sales_rows}
         empty_purchase_rows = {key: [] for key in purchase_rows}
         empty_accounting = {"bankAccounts": [], "bankTransactions": [], "expenses": [], "automatedBills": []}
@@ -1415,9 +1520,17 @@ class TenantWorkspaceView(views.APIView):
             "smsMarketing": {"creditBalance": 0, "templates": [], "campaigns": []},
         }
 
+        latest_activity = ActivityLog.objects.filter(business=business).order_by("-created_at").first()
+        synced_at = timezone.now()
+
         return Response({
             "success": True,
             "tenant": {"businessId": str(business.id), "userId": str(request.user.id)},
+            "realtime": {
+                "syncedAt": timezone.localtime(synced_at).isoformat(),
+                "version": str(latest_activity.id) if latest_activity else f"tenant-{business.id}",
+                "latestActivityAt": timezone.localtime(latest_activity.created_at).isoformat() if latest_activity else "",
+            },
             "business": _business_payload(business),
             "providerStatus": _external_provider_payload(),
             "modulePermissions": module_permissions,
@@ -1674,10 +1787,13 @@ class UserManagementViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
         user = self.get_object()
+        if user.id == request.user.id:
+            return Response(
+                {"success": False, "message": "You cannot delete your own active login user."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         user.is_active = False
-        # To show as deleted in front-end
-        user.first_name = f"{user.first_name} (Deleted)"
-        user.save()
+        user.save(update_fields=["is_active"])
         
         ActivityLog.objects.create(
             business=request.business,

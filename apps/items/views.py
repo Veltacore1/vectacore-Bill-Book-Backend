@@ -7,14 +7,14 @@ from django.db import transaction
 from django.db.models import F, Q
 from .models import (
     ItemCategory, Godown, Item, ItemGodownStock, StockMovement,
-    GodownTransfer, PriceHistory, ItemPartyPrice, BarcodeLabel, BARCODE_LABEL_SIZES,
+    GodownTransfer, PriceHistory, ItemPartyPrice, ItemOffer, BarcodeLabel, BARCODE_LABEL_SIZES,
     apply_stock_movement, sync_item_current_stock, make_item_barcode_value,
     generate_barcode_svg, get_barcode_label_size
 )
 from .serializers import (
     ItemCategorySerializer, GodownSerializer, ItemSerializer,
     ItemGodownStockSerializer, StockMovementSerializer, GodownTransferSerializer,
-    ItemPartyPriceSerializer, BarcodeLabelSerializer
+    ItemPartyPriceSerializer, ItemOfferSerializer, BarcodeLabelSerializer
 )
 from decimal import Decimal
 from django.http import HttpResponse
@@ -147,7 +147,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         queryset = (
             Item.objects.filter(business=self.request.business, is_active=True)
             .select_related("category", "godown")
-            .prefetch_related("godown_stocks__godown", "party_prices__party")
+            .prefetch_related("godown_stocks__godown", "party_prices__party", "offers")
         )
         
         # Category filtering
@@ -377,6 +377,43 @@ class ItemPartyPriceViewSet(viewsets.ModelViewSet):
             self.get_serializer(price).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class ItemOfferViewSet(viewsets.ModelViewSet):
+    serializer_class = ItemOfferSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if not self.request.business:
+            return ItemOffer.objects.none()
+        queryset = ItemOffer.objects.filter(
+            business=self.request.business,
+            item__is_active=True,
+        ).select_related("item", "created_by")
+        item_id = self.request.query_params.get("item")
+        status_value = self.request.query_params.get("status")
+        if item_id:
+            queryset = queryset.filter(item_id=item_id)
+        if status_value:
+            queryset = queryset.filter(status=status_value)
+        return queryset.order_by("-updated_at", "-created_at")
+
+    def perform_update(self, serializer):
+        serializer.save(business=self.request.business)
+
+    @action(detail=True, methods=["post"])
+    def activate(self, request, pk=None):
+        offer = self.get_object()
+        offer.status = "active"
+        offer.save(update_fields=["status", "updated_at"])
+        return Response({"success": True, "offer": self.get_serializer(offer).data})
+
+    @action(detail=True, methods=["post"])
+    def pause(self, request, pk=None):
+        offer = self.get_object()
+        offer.status = "paused"
+        offer.save(update_fields=["status", "updated_at"])
+        return Response({"success": True, "offer": self.get_serializer(offer).data})
 
 class GodownTransferViewSet(viewsets.ModelViewSet):
     serializer_class = GodownTransferSerializer

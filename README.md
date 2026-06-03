@@ -98,6 +98,8 @@ Provider readiness can be checked without printing token values:
 python manage.py integration_smoke --json
 ```
 
+Production e-invoice and e-way bill readiness are checked independently. Configure `E_INVOICE_PROVIDER`, `E_INVOICE_API_URL`, `E_INVOICE_API_TOKEN`, plus `E_WAY_BILL_PROVIDER`, `E_WAY_BILL_API_URL`, and `E_WAY_BILL_API_TOKEN` before running deployment checks.
+
 Live provider calls require an explicit network opt-in. For example, after configuring rotated Resend credentials in the environment:
 
 ```bash

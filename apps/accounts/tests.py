@@ -207,6 +207,12 @@ class TenantOnboardingPermissionTests(APITestCase):
         RAZORPAY_KEY_ID="rzp_test_key",
         RAZORPAY_KEY_SECRET="razorpay-secret",
         RAZORPAY_WEBHOOK_SECRET="razorpay-webhook-secret",
+        E_INVOICE_PROVIDER="gst_provider",
+        E_INVOICE_API_URL="https://einvoice.example.test",
+        E_INVOICE_API_TOKEN="einvoice-token",
+        E_WAY_BILL_PROVIDER="eway_gateway",
+        E_WAY_BILL_API_URL="https://eway.example.test",
+        E_WAY_BILL_API_TOKEN="eway-token",
         SHIPPING_PROVIDER="shiprocket",
         SHIPROCKET_API_URL="https://shiprocket.example.test",
         SHIPROCKET_EMAIL="ship@example.com",
@@ -225,12 +231,16 @@ class TenantOnboardingPermissionTests(APITestCase):
 
         output = stdout.getvalue()
         payload = json.loads(output)
+        self.assertTrue(payload["checks"]["eInvoice"]["ready"])
+        self.assertTrue(payload["checks"]["eWayBill"]["ready"])
         self.assertTrue(payload["checks"]["email"]["ready"])
         self.assertTrue(payload["checks"]["paymentGateway"]["ready"])
         self.assertTrue(payload["checks"]["shipping"]["ready"])
         self.assertTrue(payload["checks"]["whatsapp"]["ready"])
         self.assertNotIn("test-resend-token", output)
         self.assertNotIn("razorpay-secret", output)
+        self.assertNotIn("einvoice-token", output)
+        self.assertNotIn("eway-token", output)
         self.assertNotIn("shiprocket-password", output)
         self.assertNotIn("gupshup-token", output)
 
@@ -457,6 +467,7 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertIn("accounts.W003", ids)
         self.assertIn("accounts.W004", ids)
         self.assertIn("accounts.W005", ids)
+        self.assertIn("accounts.W006", ids)
 
     @override_settings(
         DEBUG=False,
@@ -470,6 +481,9 @@ class TenantOnboardingPermissionTests(APITestCase):
         E_INVOICE_PROVIDER="gst_provider",
         E_INVOICE_API_URL="https://einvoice.example.test",
         E_INVOICE_API_TOKEN="einvoice-token",
+        E_WAY_BILL_PROVIDER="eway_gateway",
+        E_WAY_BILL_API_URL="https://eway.example.test",
+        E_WAY_BILL_API_TOKEN="eway-token",
         EMAIL_PROVIDER="resend",
         RESEND_API_KEY="resend-token",
         RESEND_FROM_EMAIL="reports@example.com",
@@ -521,6 +535,8 @@ class TenantOnboardingPermissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         provider_status = response.data["providerStatus"]
+        self.assertFalse(provider_status["eWayBill"]["configured"])
+        self.assertEqual(provider_status["eWayBill"]["missing"], [])
         self.assertFalse(provider_status["paymentGateway"]["configured"])
         self.assertEqual(provider_status["paymentGateway"]["missing"], ["RAZORPAY_WEBHOOK_SECRET"])
         self.assertTrue(provider_status["shipping"]["configured"])
@@ -697,6 +713,22 @@ class TenantOnboardingPermissionTests(APITestCase):
             total_amount=75,
             paid_amount=75,
         )
+        Item.objects.create(
+            business=business,
+            name="Low Stock Silk",
+            selling_price=1200,
+            purchase_price=800,
+            current_stock=1,
+            low_stock_qty=2,
+        )
+        Item.objects.create(
+            business=other_business,
+            name="Other Low Stock Silk",
+            selling_price=9999,
+            purchase_price=8000,
+            current_stock=0,
+            low_stock_qty=5,
+        )
         BankAccount.objects.create(
             business=business,
             account_name="Main Cash",
@@ -735,6 +767,16 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(dashboard["stats"]["totalPurchases"], 600.0)
         self.assertEqual(dashboard["stats"]["bankBalance"], 500.0)
         self.assertEqual(dashboard["stats"]["expenseTotal"], 75.0)
+        checklist = {row["id"]: row for row in dashboard["checklist"]}
+        self.assertEqual(checklist["collect"]["count"], 1)
+        self.assertEqual(checklist["collect"]["target"], "payment-in")
+        self.assertEqual(checklist["pay"]["count"], 1)
+        self.assertEqual(checklist["pay"]["target"], "payment-out")
+        self.assertEqual(checklist["stock"]["count"], 1)
+        self.assertEqual(checklist["stock"]["priority"], "high")
+        self.assertIn("Low Stock Silk", checklist["stock"]["description"])
+        self.assertNotIn("Other Low Stock Silk", checklist["stock"]["description"])
+        self.assertEqual(checklist["expense"]["value"], 75.0)
 
         transaction_numbers = {row["txnNo"] for row in response.data["transactions"]}
         self.assertTrue({
@@ -785,6 +827,51 @@ class TenantOnboardingPermissionTests(APITestCase):
         allowed_delete = self.client.delete(f"/api/v1/auth/users/{target.id}/")
         self.assertEqual(allowed_delete.status_code, status.HTTP_200_OK)
         target.refresh_from_db()
+        self.assertFalse(target.is_active)
+
+    def test_user_management_reactivates_deleted_user_and_blocks_duplicate_active_mobile(self):
+        business = Business.objects.create(name="User Lifecycle Tenant", phone="9000000061")
+        admin = self.make_user(business, "9000000062", "admin", "Admin")
+        deleted_user = self.make_user(business, "9000000063", "salesman", "Old User")
+        deleted_user.is_active = False
+        deleted_user.save(update_fields=["is_active"])
+
+        self.auth_as(admin)
+        reactivate_response = self.client.post("/api/v1/auth/users/", {
+            "first_name": "New User",
+            "mobile": "9000000063",
+            "role": "accountant",
+        }, format="json")
+        self.assertEqual(reactivate_response.status_code, status.HTTP_201_CREATED)
+        deleted_user.refresh_from_db()
+        self.assertTrue(deleted_user.is_active)
+        self.assertEqual(deleted_user.first_name, "New User")
+        self.assertEqual(deleted_user.role, "accountant")
+
+        duplicate_response = self.client.post("/api/v1/auth/users/", {
+            "first_name": "Duplicate",
+            "mobile": "9000000063",
+            "role": "salesman",
+        }, format="json")
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_can_update_tenant_user_role_and_status(self):
+        business = Business.objects.create(name="User Update Tenant", phone="9000000064")
+        admin = self.make_user(business, "9000000065", "admin", "Admin")
+        target = self.make_user(business, "9000000066", "salesman", "Counter User")
+
+        self.auth_as(admin)
+        response = self.client.patch(f"/api/v1/auth/users/{target.id}/", {
+            "first_name": "Accounts Counter",
+            "role": "accountant",
+            "is_active": False,
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        target.refresh_from_db()
+        self.assertEqual(target.business, business)
+        self.assertEqual(target.first_name, "Accounts Counter")
+        self.assertEqual(target.role, "accountant")
         self.assertFalse(target.is_active)
 
     def test_deleted_user_token_cannot_access_workspace(self):

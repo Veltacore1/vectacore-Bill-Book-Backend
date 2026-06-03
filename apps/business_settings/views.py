@@ -8,7 +8,16 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.accounts.activity import write_activity
-from .models import BusinessNotification, BusinessPreference, InvoiceSettings, Reminder, ReminderPreference
+from apps.accounts.sequences import next_model_document_number
+from .models import (
+    BusinessNotification,
+    BusinessPreference,
+    InvoiceSettings,
+    ReferralInvite,
+    Reminder,
+    ReminderPreference,
+    SupportTicket,
+)
 from .notifications import (
     mark_notification_read,
     notification_counts,
@@ -19,8 +28,10 @@ from .serializers import (
     BusinessNotificationSerializer,
     BusinessPreferenceSerializer,
     InvoiceSettingsSerializer,
+    ReferralInviteSerializer,
     ReminderPreferenceSerializer,
     ReminderSerializer,
+    SupportTicketSerializer,
 )
 
 
@@ -239,6 +250,17 @@ CA_REPORT_BUNDLE = [
     ("party-statement", "Party Statement (Ledger)"),
     ("stock-summary", "Stock Summary"),
 ]
+
+
+def _tenant_referral_code(business, preferences):
+    if preferences.referral_code:
+        return preferences.referral_code
+
+    initials = "".join(char for char in (business.name or "VB").upper() if char.isalnum())[:3] or "VB"
+    code = f"{initials}{timezone.localdate().year}"
+    preferences.referral_code = code
+    preferences.save(update_fields=["referral_code", "updated_at"])
+    return code
 
 
 def _ca_recipient(preferences, request_data=None):
@@ -593,6 +615,159 @@ class ReminderPreferenceViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(preferences)
         return Response({"success": True, "data": serializer.data})
+
+
+class ReferralInviteViewSet(viewsets.ModelViewSet):
+    serializer_class = ReferralInviteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    search_fields = ["business_name", "contact_name", "mobile", "referral_code"]
+    ordering_fields = ["created_at", "updated_at", "status"]
+
+    def get_queryset(self):
+        if not self.request.business:
+            return ReferralInvite.objects.none()
+        return ReferralInvite.objects.filter(business=self.request.business).order_by("-created_at")
+
+    def create(self, request, *args, **kwargs):
+        business = request.business
+        if not business:
+            return Response(
+                {"success": False, "message": "No active business associated"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        mobile = serializer.validated_data["mobile"]
+        if ReferralInvite.objects.filter(business=business, mobile=mobile).exclude(status="expired").exists():
+            return Response(
+                {"success": False, "message": "This mobile number already has an active referral invite"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        preferences, _created = BusinessPreference.objects.get_or_create(business=business)
+        referral_code = _tenant_referral_code(business, preferences)
+        invite = serializer.save(
+            business=business,
+            referral_code=referral_code,
+            created_by=request.user if request.user and request.user.is_authenticated else None,
+            reward_label="Pending",
+        )
+        write_activity(
+            business=business,
+            user=request.user,
+            action="referral_invite_created",
+            entity_type="referral_invite",
+            entity_id=invite.id,
+            details={
+                "businessName": invite.business_name,
+                "mobile": invite.mobile,
+                "referralCode": invite.referral_code,
+            },
+        )
+        upsert_notification(
+            business=business,
+            source_type="referral_invite",
+            source_key=str(invite.id),
+            title="Referral invite created",
+            message=f"{invite.business_name} was invited with code {invite.referral_code}",
+            priority="low",
+            target="settings",
+            metadata={"inviteId": str(invite.id), "mobile": invite.mobile},
+        )
+        return Response(self.get_serializer(invite).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def mark_activated(self, request, pk=None):
+        invite = self.get_object()
+        if invite.status in ["rewarded", "expired"]:
+            return Response({"success": False, "message": "This invite can no longer be activated"}, status=status.HTTP_400_BAD_REQUEST)
+        invite.status = "activated"
+        invite.reward_label = request.data.get("reward_label") or "Rs 500 Credit"
+        invite.activated_at = timezone.now()
+        invite.save(update_fields=["status", "reward_label", "activated_at", "updated_at"])
+        write_activity(
+            business=request.business,
+            user=request.user,
+            action="referral_invite_activated",
+            entity_type="referral_invite",
+            entity_id=invite.id,
+            details={"businessName": invite.business_name, "reward": invite.reward_label},
+        )
+        return Response({"success": True, "invite": self.get_serializer(invite).data})
+
+
+class SupportTicketViewSet(viewsets.ModelViewSet):
+    serializer_class = SupportTicketSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    search_fields = ["ticket_number", "subject", "message", "contact_mobile", "contact_email"]
+    ordering_fields = ["created_at", "updated_at", "status", "priority"]
+
+    def get_queryset(self):
+        if not self.request.business:
+            return SupportTicket.objects.none()
+        queryset = SupportTicket.objects.filter(business=self.request.business).order_by("-created_at")
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        return queryset
+
+    def perform_create(self, serializer):
+        business = self.request.business
+        prefix = business.invoice_prefix or "VB"
+        ticket_number = next_model_document_number(
+            business=business,
+            sequence_key=f"support_ticket:{prefix}",
+            model=SupportTicket,
+            field_name="ticket_number",
+            number_prefix=f"{prefix}/SUP/",
+        )
+        ticket = serializer.save(
+            business=business,
+            ticket_number=ticket_number,
+            created_by=self.request.user if self.request.user and self.request.user.is_authenticated else None,
+        )
+        write_activity(
+            business=business,
+            user=self.request.user,
+            action="support_ticket_created",
+            entity_type="support_ticket",
+            entity_id=ticket.id,
+            details={
+                "ticketNumber": ticket.ticket_number,
+                "subject": ticket.subject,
+                "category": ticket.category,
+                "priority": ticket.priority,
+            },
+        )
+        upsert_notification(
+            business=business,
+            source_type="support_ticket",
+            source_key=str(ticket.id),
+            title=f"Support ticket {ticket.ticket_number} opened",
+            message=ticket.subject,
+            priority=ticket.priority,
+            target="settings",
+            metadata={"ticketId": str(ticket.id), "category": ticket.category},
+        )
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        ticket = self.get_object()
+        if ticket.status in ["resolved", "closed"]:
+            return Response({"success": False, "message": "Ticket is already closed"}, status=status.HTTP_400_BAD_REQUEST)
+        ticket.status = "resolved"
+        ticket.resolved_at = timezone.now()
+        ticket.save(update_fields=["status", "resolved_at", "updated_at"])
+        write_activity(
+            business=request.business,
+            user=request.user,
+            action="support_ticket_resolved",
+            entity_type="support_ticket",
+            entity_id=ticket.id,
+            details={"ticketNumber": ticket.ticket_number},
+        )
+        return Response({"success": True, "ticket": self.get_serializer(ticket).data})
 
 class ReminderViewSet(viewsets.ModelViewSet):
     serializer_class = ReminderSerializer

@@ -1,5 +1,6 @@
 import json
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.core.validators import validate_email
@@ -40,6 +41,38 @@ def _delivery_payload(result):
     }
 
 
+def _einvoice_ready():
+    provider = (getattr(settings, "E_INVOICE_PROVIDER", "disabled") or "disabled").strip().lower()
+    if provider in {"disabled", ""}:
+        return False, "disabled", "E-invoice provider is not configured."
+    if provider in {"local_stub", "demo", "stub"}:
+        if getattr(settings, "DEBUG", False):
+            return True, provider, "Local e-invoice stub is ready for development only."
+        return False, provider, "Local e-invoice stub is disabled outside DEBUG."
+    missing = [
+        name
+        for name in ("E_INVOICE_API_URL", "E_INVOICE_API_TOKEN")
+        if not getattr(settings, name, "")
+    ]
+    if missing:
+        return False, provider, f"Missing e-invoice settings: {', '.join(missing)}."
+    return True, provider, ""
+
+
+def _eway_bill_ready():
+    provider = (getattr(settings, "E_WAY_BILL_PROVIDER", "disabled") or "disabled").strip().lower()
+    if provider in {"disabled", ""}:
+        return False, "disabled", "E-way bill provider is not configured."
+    missing = [
+        name
+        for name in ("E_WAY_BILL_API_URL", "E_WAY_BILL_API_TOKEN")
+        if not getattr(settings, name, "")
+    ]
+    if missing:
+        return False, provider, f"Missing e-way bill settings: {', '.join(missing)}."
+    return True, provider, ""
+
+
 def _validate_email(value):
     try:
         validate_email(value)
@@ -72,6 +105,8 @@ class Command(BaseCommand):
 
         payload = {
             "checks": {
+                "eInvoice": _status_payload(_einvoice_ready),
+                "eWayBill": _status_payload(_eway_bill_ready),
                 "email": _status_payload(email_provider_status),
                 "sms": _status_payload(sms_provider_ready),
                 "whatsapp": _status_payload(whatsapp_provider_ready),

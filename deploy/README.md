@@ -27,6 +27,9 @@ EMAIL_PROVIDER=resend
 RESEND_API_KEY=<real Resend key>
 RESEND_FROM_EMAIL=<verified sender>
 E_INVOICE_PROVIDER=<real provider or disabled>
+E_WAY_BILL_PROVIDER=<real provider or disabled>
+E_WAY_BILL_API_URL=<real e-way bill API URL>
+E_WAY_BILL_API_TOKEN=<real e-way bill token>
 ```
 
 The frontend image must be built with a browser-reachable API URL, for example:

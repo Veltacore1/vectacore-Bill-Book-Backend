@@ -117,13 +117,33 @@ USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# CORS configuration
-CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "True" if DEBUG else "False") == "True"
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
-    if origin.strip()
+# CORS / CSRF configuration
+def csv_env(name: str) -> list[str]:
+    return [
+        value.strip()
+        for value in os.getenv(name, "").split(",")
+        if value.strip()
+    ]
+
+
+LOCAL_DEV_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ]
+
+
+def unique_origins(origins: list[str]) -> list[str]:
+    return list(dict.fromkeys(origins))
+
+
+CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "True" if DEBUG else "False") == "True"
+CORS_ALLOWED_ORIGINS = csv_env("CORS_ALLOWED_ORIGINS")
+if DEBUG and not CORS_ALLOW_ALL_ORIGINS:
+    CORS_ALLOWED_ORIGINS = unique_origins(CORS_ALLOWED_ORIGINS + LOCAL_DEV_ORIGINS)
 CORS_ALLOW_CREDENTIALS = True
 
 # Production security. Keep local development easy, but allow deployment to pass
@@ -142,11 +162,9 @@ SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0" if DEBUG else "31
 SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "False" if DEBUG else "True") == "True"
 SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "False") == "True"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-CSRF_TRUSTED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
-    if origin.strip()
-]
+CSRF_TRUSTED_ORIGINS = csv_env("CSRF_TRUSTED_ORIGINS")
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS = unique_origins(CSRF_TRUSTED_ORIGINS + LOCAL_DEV_ORIGINS)
 
 # Browser auth hardening. Access tokens are short lived and returned to the
 # React app, while refresh tokens are also set as HttpOnly cookies so the app
@@ -190,6 +208,9 @@ DEMO_TENANT_MOBILE = os.getenv("DEMO_TENANT_MOBILE", "8608633066")
 E_INVOICE_PROVIDER = os.getenv("E_INVOICE_PROVIDER", "local_stub" if DEBUG else "disabled").strip().lower()
 E_INVOICE_API_URL = os.getenv("E_INVOICE_API_URL", "").strip()
 E_INVOICE_API_TOKEN = os.getenv("E_INVOICE_API_TOKEN", "").strip()
+E_WAY_BILL_PROVIDER = os.getenv("E_WAY_BILL_PROVIDER", "disabled").strip().lower()
+E_WAY_BILL_API_URL = os.getenv("E_WAY_BILL_API_URL", "").strip()
+E_WAY_BILL_API_TOKEN = os.getenv("E_WAY_BILL_API_TOKEN", "").strip()
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "local_stub" if DEBUG else "disabled").strip().lower()
 SMS_PROVIDER_API_URL = os.getenv("SMS_PROVIDER_API_URL", "").strip()
 SMS_PROVIDER_API_TOKEN = os.getenv("SMS_PROVIDER_API_TOKEN", "").strip()

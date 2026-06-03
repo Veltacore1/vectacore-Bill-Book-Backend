@@ -227,6 +227,50 @@ class SalesInvoiceSettingsTests(APITestCase):
         self.assertIn("Packing", html)
         self.assertNotIn("<th>HSN</th>", html)
 
+    def test_pos_invoice_without_party_uses_tenant_cash_sale_party(self):
+        response = self.client.post("/api/v1/sales/invoices/", {
+            "subtotal": "1000.00",
+            "discount_amount": "0.00",
+            "discount_pct": "0.00",
+            "taxable_amount": "1000.00",
+            "cgst_amount": "25.00",
+            "sgst_amount": "25.00",
+            "igst_amount": "0.00",
+            "cess_amount": "0.00",
+            "additional_charges": "0.00",
+            "total_amount": "1050.00",
+            "paid_amount": "1050.00",
+            "payment_mode": "cash",
+            "place_of_supply": "Tamil Nadu",
+            "is_pos": True,
+            "line_items": [{
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "item_code": self.item.item_code,
+                "hsn_code": self.item.hsn_code,
+                "unit": "PCS",
+                "quantity": "1.000",
+                "free_quantity": "0.000",
+                "mrp": "1200.00",
+                "rate": "1000.00",
+                "discount_pct": "0.00",
+                "discount_amount": "0.00",
+                "gst_rate": "5.00",
+                "taxable_amount": "1000.00",
+                "tax_amount": "50.00",
+                "amount": "1050.00",
+                "sort_order": 0,
+            }],
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["party_name"], "Cash Sale")
+
+        invoice = SalesInvoice.objects.get(id=response.data["id"])
+        self.assertEqual(invoice.party.name, "Cash Sale")
+        self.assertEqual(invoice.party.business, self.business)
+        self.assertEqual(PaymentIn.objects.get(reference_number=invoice.invoice_number).party, invoice.party)
+
 
 class SalesInvoiceLifecycleTests(APITestCase):
     def setUp(self):

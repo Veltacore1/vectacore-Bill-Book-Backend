@@ -11,6 +11,7 @@ from .serializers import (
     SMSCreditLedgerSerializer,
     SMSTemplateSerializer,
     OnlineOrderSerializer,
+    sms_credit_balance,
 )
 from .messaging import (
     process_messaging_delivery_webhook,
@@ -31,6 +32,13 @@ from apps.items.models import Item, ItemGodownStock, apply_stock_movement
 
 
 STOCK_OUT_STATUSES = {"packed", "shipped", "delivered"}
+DISPATCH_TRANSITIONS = {
+    "new": {"packed", "cancelled"},
+    "packed": {"shipped", "cancelled"},
+    "shipped": {"delivered", "cancelled"},
+    "delivered": set(),
+    "cancelled": set(),
+}
 
 
 class OnlineOrderViewSet(viewsets.ModelViewSet):
@@ -121,16 +129,34 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
             )
 
             if dispatch_status:
+                allowed_next = DISPATCH_TRANSITIONS.get(order.dispatch_status, set())
+                if dispatch_status != order.dispatch_status and dispatch_status not in allowed_next:
+                    return Response(
+                        {
+                            "success": False,
+                            "message": f"Cannot move online order from {order.dispatch_status} to {dispatch_status}.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 if dispatch_status in STOCK_OUT_STATUSES:
                     self._deduct_stock(order)
                 elif dispatch_status == "cancelled":
                     self._restore_stock(order)
                 order.dispatch_status = dispatch_status
+                if dispatch_status == "shipped" and not order.shipped_at:
+                    order.shipped_at = timezone.now()
+                if dispatch_status == "delivered" and not order.delivered_at:
+                    order.delivered_at = timezone.now()
+                    if order.payment_status == "cod" and not payment_status_value:
+                        order.payment_status = "paid"
 
             if payment_status_value:
                 order.payment_status = payment_status_value
 
-            order.save(update_fields=["dispatch_status", "payment_status", "stock_deducted", "updated_at"])
+            order.save(update_fields=[
+                "dispatch_status", "payment_status", "stock_deducted",
+                "shipped_at", "delivered_at", "updated_at",
+            ])
 
         serializer = self.get_serializer(order)
         return Response({"success": True, "message": "Online order updated", "order": serializer.data})
@@ -290,6 +316,87 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
         if status_param:
             queryset = queryset.filter(status=status_param)
         return queryset.order_by("-created_at")
+
+    @action(detail=True, methods=["post"])
+    def queue(self, request, pk=None):
+        campaign = self.get_object()
+        if campaign.status != "draft":
+            return Response({"success": False, "message": "Only draft campaigns can be queued"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not campaign.recipients.exists():
+            return Response({"success": False, "message": "Campaign has no reachable customers"}, status=status.HTTP_400_BAD_REQUEST)
+
+        ready, provider, message = sms_provider_ready()
+        if not ready:
+            return Response(
+                {"success": False, "message": message or f"SMS provider {provider} is not ready"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if sms_credit_balance(request.business) < campaign.credit_cost:
+            return Response({"success": False, "message": "Not enough SMS credits for this campaign"}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            campaign = SMSCampaign.objects.select_for_update().get(id=campaign.id, business=request.business)
+            if campaign.status != "draft":
+                return Response({"success": False, "message": "Only draft campaigns can be queued"}, status=status.HTTP_400_BAD_REQUEST)
+
+            campaign.status = "queued"
+            campaign.queued_at = timezone.now()
+            campaign.save(update_fields=["status", "queued_at", "updated_at"])
+
+            if campaign.credit_cost:
+                SMSCreditLedger.objects.create(
+                    business=request.business,
+                    entry_type="debit",
+                    credits=campaign.credit_cost,
+                    reference=campaign.campaign_number,
+                    notes=f"Queued {campaign.name} to {campaign.recipient_count} customers",
+                )
+
+        serializer = self.get_serializer(campaign)
+        return Response({
+            "success": True,
+            "message": f"{campaign.campaign_number} queued for {campaign.recipient_count} customers",
+            "campaign": serializer.data,
+        })
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        campaign = self.get_object()
+        if campaign.status not in ["draft", "queued"]:
+            return Response({"success": False, "message": "Only draft or queued campaigns can be cancelled"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if campaign.status == "queued" and campaign.recipients.exclude(status="queued").exists():
+            return Response({"success": False, "message": "Campaign has already been sent to the provider"}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            campaign = SMSCampaign.objects.select_for_update().get(id=campaign.id, business=request.business)
+            previous_status = campaign.status
+            if previous_status not in ["draft", "queued"]:
+                return Response({"success": False, "message": "Only draft or queued campaigns can be cancelled"}, status=status.HTTP_400_BAD_REQUEST)
+            if previous_status == "queued" and campaign.recipients.exclude(status="queued").exists():
+                return Response({"success": False, "message": "Campaign has already been sent to the provider"}, status=status.HTTP_400_BAD_REQUEST)
+
+            campaign.status = "cancelled"
+            campaign.completed_at = timezone.now()
+            campaign.save(update_fields=["status", "completed_at", "updated_at"])
+
+            if previous_status == "queued" and campaign.credit_cost:
+                SMSCreditLedger.objects.create(
+                    business=request.business,
+                    entry_type="credit",
+                    credits=campaign.credit_cost,
+                    reference=f"{campaign.campaign_number}:cancelled",
+                    notes=f"Refunded cancelled campaign {campaign.name}",
+                )
+
+        serializer = self.get_serializer(campaign)
+        return Response({
+            "success": True,
+            "message": f"{campaign.campaign_number} cancelled",
+            "campaign": serializer.data,
+        })
 
     @action(detail=True, methods=["post"])
     def sync_delivery(self, request, pk=None):

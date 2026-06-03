@@ -7,6 +7,7 @@ from .models import (
     ProformaInvoice, ProformaInvoiceItem, SalesReturn, SalesReturnItem
 )
 from apps.items.models import Item, PriceHistory, apply_stock_movement
+from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentInSettlement
 from apps.business_settings.models import InvoiceSettings
 from apps.accounts.sequences import next_model_document_number
@@ -110,6 +111,7 @@ class EInvoiceLogSerializer(serializers.ModelSerializer):
 
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     line_items = SalesInvoiceItemSerializer(many=True)
+    party = serializers.PrimaryKeyRelatedField(queryset=Party.objects.all(), required=False, allow_null=True)
     party_name = serializers.CharField(source="party.name", read_only=True)
     party_mobile = serializers.CharField(source="party.mobile", read_only=True)
     party_gstin = serializers.CharField(source="party.gstin", read_only=True)
@@ -166,9 +168,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         return line_items
 
     def validate(self, attrs):
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        is_pos = bool(attrs.get("is_pos", getattr(self.instance, "is_pos", False)))
         total_amount = Decimal(str(attrs.get("total_amount", getattr(self.instance, "total_amount", 0)) or 0))
         paid_amount = Decimal(str(attrs.get("paid_amount", getattr(self.instance, "paid_amount", 0)) or 0))
 
+        if not party and not is_pos:
+            raise serializers.ValidationError({"party": "Select a customer before saving the invoice."})
         if total_amount <= 0:
             raise serializers.ValidationError({"total_amount": "Invoice total must be greater than zero."})
         if paid_amount < 0:
@@ -191,6 +197,20 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             )
             invoice_date = validated_data.get("invoice_date") or timezone.localdate()
             invoice_num = _next_invoice_number(business, invoice_settings, invoice_date)
+            if not validated_data.get("party") and validated_data.get("is_pos"):
+                cash_party = (
+                    Party.objects.select_for_update()
+                    .filter(business=business, name__iexact="Cash Sale", is_active=True)
+                    .order_by("created_at")
+                    .first()
+                )
+                if not cash_party:
+                    cash_party = Party.objects.create(
+                        business=business,
+                        name="Cash Sale",
+                        party_type="customer",
+                    )
+                validated_data["party"] = cash_party
             
             # 2. Determine payment status based on paid amount
             total_amt = validated_data["total_amount"]

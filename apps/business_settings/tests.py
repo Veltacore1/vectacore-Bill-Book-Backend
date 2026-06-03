@@ -11,7 +11,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import ActivityLog, Business, User
 from apps.accounting.models import ReportShare
-from apps.business_settings.models import BusinessNotification, Reminder
+from apps.business_settings.models import BusinessNotification, BusinessPreference, ReferralInvite, Reminder, SupportTicket
 from apps.parties.models import Party
 
 
@@ -321,3 +321,74 @@ class ReminderDeliveryLifecycleTests(APITestCase):
                 entity_type="business_preference",
             ).exists()
         )
+
+    def test_referral_invite_create_activate_and_duplicate_guard_are_tenant_scoped(self):
+        BusinessPreference.objects.create(business=self.business, referral_code="SMT2026")
+        ReferralInvite.objects.create(
+            business=self.other_business,
+            referral_code="OTH2026",
+            business_name="Other Tenant Invite",
+            mobile="9876543210",
+        )
+
+        create_response = self.client.post("/api/v1/settings/referral-invites/", {
+            "business_name": "Mecheri Textiles",
+            "contact_name": "Ravi",
+            "mobile": "9876543210",
+            "notes": "Met at Salem textile market",
+        }, format="json")
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["referral_code"], "SMT2026")
+        self.assertEqual(ReferralInvite.objects.filter(business=self.business).count(), 1)
+        self.assertEqual(ReferralInvite.objects.filter(business=self.other_business).count(), 1)
+        self.assertTrue(BusinessNotification.objects.filter(business=self.business, source_type="referral_invite").exists())
+
+        duplicate_response = self.client.post("/api/v1/settings/referral-invites/", {
+            "business_name": "Duplicate Textiles",
+            "mobile": "9876543210",
+        }, format="json")
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invite = ReferralInvite.objects.get(business=self.business)
+        activate_response = self.client.post(f"/api/v1/settings/referral-invites/{invite.id}/mark_activated/", {}, format="json")
+        self.assertEqual(activate_response.status_code, status.HTTP_200_OK)
+        invite.refresh_from_db()
+        self.assertEqual(invite.status, "activated")
+        self.assertEqual(invite.reward_label, "Rs 500 Credit")
+        self.assertIsNotNone(invite.activated_at)
+
+    def test_support_ticket_create_resolve_and_list_are_tenant_scoped(self):
+        SupportTicket.objects.create(
+            business=self.other_business,
+            ticket_number="OTH/SUP/0001",
+            subject="Other tenant issue",
+            message="Must not be visible to this tenant.",
+        )
+
+        create_response = self.client.post("/api/v1/settings/support-tickets/", {
+            "subject": "Barcode print help",
+            "category": "technical",
+            "channel": "chat",
+            "priority": "high",
+            "message": "Barcode labels are not aligned in the thermal printer.",
+            "contact_name": "Admin",
+            "contact_mobile": "9300000003",
+        }, format="json")
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(create_response.data["ticket_number"].endswith("0001"))
+        ticket = SupportTicket.objects.get(business=self.business)
+        self.assertEqual(ticket.status, "open")
+        self.assertTrue(BusinessNotification.objects.filter(business=self.business, source_type="support_ticket").exists())
+
+        list_response = self.client.get("/api/v1/settings/support-tickets/")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertNotIn("Other tenant issue", str(list_response.data))
+
+        resolve_response = self.client.post(f"/api/v1/settings/support-tickets/{ticket.id}/resolve/", {}, format="json")
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, "resolved")
+        self.assertIsNotNone(ticket.resolved_at)

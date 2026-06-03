@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from apps.accounts.models import Business
+from apps.accounts.models import User
 from apps.parties.models import Party
 
 class InvoiceSettings(models.Model):
@@ -174,3 +175,91 @@ class BusinessNotification(models.Model):
             models.Index(fields=["business", "status", "-created_at"], name="notif_business_status_idx"),
             models.Index(fields=["business", "source_type", "source_id"], name="notif_business_source_idx"),
         ]
+
+
+class ReferralInvite(models.Model):
+    STATUS_CHOICES = (
+        ("invited", "Invited"),
+        ("activated", "Activated"),
+        ("rewarded", "Rewarded"),
+        ("expired", "Expired"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="referral_invites")
+    referral_code = models.CharField(max_length=40)
+    business_name = models.CharField(max_length=160)
+    contact_name = models.CharField(max_length=120, blank=True, default="")
+    mobile = models.CharField(max_length=20)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="invited")
+    reward_label = models.CharField(max_length=80, blank=True, default="Pending")
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    activated_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "referral_invites"
+        constraints = [
+            models.UniqueConstraint(fields=["business", "mobile"], name="uniq_referral_invite_mobile_per_business"),
+        ]
+        indexes = [
+            models.Index(fields=["business", "status", "-created_at"], name="referral_business_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.business_name} - {self.mobile}"
+
+
+class SupportTicket(models.Model):
+    CATEGORY_CHOICES = (
+        ("billing", "Billing"),
+        ("reports", "Reports"),
+        ("subscription", "Subscription"),
+        ("technical", "Technical"),
+        ("account", "Account"),
+    )
+    CHANNEL_CHOICES = (
+        ("chat", "Chat"),
+        ("call", "Call"),
+        ("email", "Email"),
+    )
+    STATUS_CHOICES = (
+        ("open", "Open"),
+        ("in_progress", "In Progress"),
+        ("resolved", "Resolved"),
+        ("closed", "Closed"),
+    )
+    PRIORITY_CHOICES = (
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="support_tickets")
+    ticket_number = models.CharField(max_length=60)
+    subject = models.CharField(max_length=180)
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="billing")
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default="chat")
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default="medium")
+    message = models.TextField()
+    contact_name = models.CharField(max_length=120, blank=True, default="")
+    contact_mobile = models.CharField(max_length=20, blank=True, default="")
+    contact_email = models.EmailField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="open")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    resolved_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "support_tickets"
+        unique_together = ("business", "ticket_number")
+        indexes = [
+            models.Index(fields=["business", "status", "-created_at"], name="support_business_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.ticket_number} - {self.subject}"
