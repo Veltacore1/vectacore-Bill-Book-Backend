@@ -310,9 +310,22 @@ def get_barcode_label_size(label_size):
     return BARCODE_LABEL_SIZES.get(label_size) or BARCODE_LABEL_SIZES["50x25"]
 
 
+def _tracking_token(value, fallback, length):
+    clean_value = re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+    return (clean_value[:length] or fallback)[:length]
+
+
+def make_item_tracking_code(business, item):
+    business_token = _tracking_token(business.invoice_prefix or business.name, "ITM", 3)
+    category_name = item.category.name if getattr(item, "category", None) else item.name
+    category_token = _tracking_token(category_name, "GEN", 3)
+    color_token = _tracking_token(getattr(item, "color", None), "STD", 3)
+    suffix = str(item.id).replace("-", "").upper()[-6:]
+    return f"{business_token}-{category_token}-{color_token}-{suffix}"
+
+
 def make_item_barcode_value(business, item):
-    prefix = re.sub(r"[^A-Za-z0-9]", "", business.invoice_prefix or business.name or "ITEM").upper()[:6] or "ITEM"
-    return f"{prefix}{str(item.id).replace('-', '').upper()[:12]}"
+    return item.item_code or make_item_tracking_code(business, item)
 
 
 def generate_barcode_svg(value):

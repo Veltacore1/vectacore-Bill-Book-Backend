@@ -15,6 +15,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - vastrabook_net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - vastrabook_net
 
   backend:
     image: ${BACKEND_IMAGE:-ghcr.io/veltacore1/vectacore-bill-book-backend:latest}
@@ -24,25 +39,55 @@ services:
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "${BACKEND_PUBLIC_PORT:-8001}:8001"
-    command: >
-      sh -c "python manage.py migrate --noinput &&
-             gunicorn config.wsgi:application
-             --bind 0.0.0.0:8001
-             --workers ${GUNICORN_WORKERS:-3}
-             --timeout ${GUNICORN_TIMEOUT:-120}
-             --access-logfile -
-             --error-logfile -"
+      redis:
+        condition: service_healthy
+    expose:
+      - 8001
+    command: sh -c "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8001 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile -"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/healthz >/dev/null"]
       interval: 30s
       timeout: 5s
       start_period: 30s
       retries: 5
+    networks:
+      - vastrabook_net
+
+  celery-worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/veltacore1/vectacore-bill-book-backend:latest}
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: sh -c "celery -A config worker --loglevel=${CELERY_LOG_LEVEL:-info} --concurrency=${CELERY_CONCURRENCY:-2} --max-tasks-per-child=${CELERY_MAX_TASKS:-1000}"
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+    networks:
+      - vastrabook_net
 
   frontend:
     image: ${FRONTEND_IMAGE:-ghcr.io/veltacore1/vectacore-bill-book-frontend:latest}
@@ -50,14 +95,49 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    ports:
-      - "${FRONTEND_PUBLIC_PORT:-8080}:80"
+    expose:
+      - 80
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
       interval: 30s
       timeout: 5s
       start_period: 15s
       retries: 5
+    networks:
+      - vastrabook_net
+
+  # Optional reverse proxy – disabled by default (USE_REVERSE_PROXY=false).
+  # When enabled, it becomes the single public entrypoint on ports 80/443,
+  # serving frontend static assets and proxying /api/* to the backend.
+  # The frontend/backend services are no longer directly exposed.
+  nginx-reverse-proxy:
+    image: ${NGINX_REVERSE_PROXY_IMAGE:-nginx:1.27-alpine}
+    restart: unless-stopped
+    profiles:
+      - reverse-proxy
+    depends_on:
+      frontend:
+        condition: service_healthy
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+      - nginx_logs:/var/log/nginx
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - vastrabook_net
 
 volumes:
   postgres_data:
+  redis_data:
+  nginx_logs:
+
+networks:
+  vastrabook_net:
+    driver: bridge

@@ -11,11 +11,15 @@ def _num(value):
     return float(value or 0)
 
 
-def _build_ledger_statement(party):
-    from apps.sales.models import SalesInvoice, CreditNote
-    from apps.purchases.models import PurchaseInvoice, DebitNote
-    from apps.payments.models import PaymentIn, PaymentOut
+def _group_by_party(queryset):
+    grouped = {}
+    for row in queryset:
+        grouped.setdefault(row.party_id, []).append(row)
+    return grouped
 
+
+def _ledger_entries_for(party, sales, payins, credits, purchases, payouts, debits):
+    """Build a chronological ledger statement for one party from pre-filtered rows."""
     entries = [
         {
             "date": party.created_at.date().isoformat(),
@@ -28,7 +32,7 @@ def _build_ledger_statement(party):
         }
     ]
 
-    for item in SalesInvoice.objects.filter(party=party).exclude(status="cancelled"):
+    for item in sales:
         entries.append({
             "date": item.invoice_date.isoformat(),
             "type": "Sales Invoice",
@@ -39,7 +43,7 @@ def _build_ledger_statement(party):
             "status": item.status.title(),
         })
 
-    for item in PaymentIn.objects.filter(party=party).exclude(status="void"):
+    for item in payins:
         entries.append({
             "date": item.payment_date.isoformat(),
             "type": "Payment In",
@@ -50,7 +54,7 @@ def _build_ledger_statement(party):
             "status": "Received",
         })
 
-    for item in CreditNote.objects.filter(party=party, status="credited"):
+    for item in credits:
         entries.append({
             "date": item.note_date.isoformat(),
             "type": "Credit Note",
@@ -61,7 +65,7 @@ def _build_ledger_statement(party):
             "status": item.status.title(),
         })
 
-    for item in PurchaseInvoice.objects.filter(party=party).exclude(status="cancelled"):
+    for item in purchases:
         entries.append({
             "date": item.invoice_date.isoformat(),
             "type": "Purchase Invoice",
@@ -72,7 +76,7 @@ def _build_ledger_statement(party):
             "status": item.status.title(),
         })
 
-    for item in PaymentOut.objects.filter(party=party).exclude(status="void"):
+    for item in payouts:
         entries.append({
             "date": item.payment_date.isoformat(),
             "type": "Payment Out",
@@ -83,7 +87,7 @@ def _build_ledger_statement(party):
             "status": "Paid",
         })
 
-    for item in DebitNote.objects.filter(party=party, status="credited"):
+    for item in debits:
         entries.append({
             "date": item.note_date.isoformat(),
             "type": "Debit Note",
@@ -103,6 +107,43 @@ def _build_ledger_statement(party):
         entry["balance"] = running
 
     return entries
+
+
+def _build_ledger_statements(parties):
+    """Batch-build ledger statements for many parties using a fixed number of
+    queries (6 total) instead of 6 per party, avoiding an N+1 over the party list."""
+    from apps.sales.models import SalesInvoice, CreditNote
+    from apps.purchases.models import PurchaseInvoice, DebitNote
+    from apps.payments.models import PaymentIn, PaymentOut
+
+    parties = list(parties)
+    if not parties:
+        return {}
+
+    party_ids = [party.id for party in parties]
+    sales = _group_by_party(SalesInvoice.objects.filter(party_id__in=party_ids).exclude(status="cancelled"))
+    payins = _group_by_party(PaymentIn.objects.filter(party_id__in=party_ids).exclude(status="void"))
+    credits = _group_by_party(CreditNote.objects.filter(party_id__in=party_ids, status="credited"))
+    purchases = _group_by_party(PurchaseInvoice.objects.filter(party_id__in=party_ids).exclude(status="cancelled"))
+    payouts = _group_by_party(PaymentOut.objects.filter(party_id__in=party_ids).exclude(status="void"))
+    debits = _group_by_party(DebitNote.objects.filter(party_id__in=party_ids, status="credited"))
+
+    return {
+        party.id: _ledger_entries_for(
+            party,
+            sales.get(party.id, []),
+            payins.get(party.id, []),
+            credits.get(party.id, []),
+            purchases.get(party.id, []),
+            payouts.get(party.id, []),
+            debits.get(party.id, []),
+        )
+        for party in parties
+    }
+
+
+def _build_ledger_statement(party):
+    return _build_ledger_statements([party])[party.id]
 
 
 class PartyCategoryViewSet(viewsets.ModelViewSet):
@@ -161,8 +202,10 @@ class PartyViewSet(viewsets.ModelViewSet):
         rows = []
         linked_parties = self.get_queryset().exclude(shared_ledger_token__isnull=True).exclude(shared_ledger_token="")
 
-        for party in linked_parties.select_related("category").order_by("name"):
-            ledger = _build_ledger_statement(party)
+        ordered_parties = list(linked_parties.select_related("category").order_by("name"))
+        ledgers = _build_ledger_statements(ordered_parties)
+        for party in ordered_parties:
+            ledger = ledgers.get(party.id, [])
             for index, entry in enumerate(ledger):
                 rows.append({
                     "id": f"{party.shared_ledger_token}-{index}",

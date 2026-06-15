@@ -448,6 +448,11 @@ class TenantOnboardingPermissionTests(APITestCase):
         DEMO_SESSION_ENABLED=True,
         SMS_PROVIDER="local_stub",
         E_INVOICE_PROVIDER="disabled",
+        E_WAY_BILL_PROVIDER="disabled",
+        EMAIL_PROVIDER="disabled",
+        PAYMENT_GATEWAY_PROVIDER="disabled",
+        SHIPPING_PROVIDER="disabled",
+        WHATSAPP_PROVIDER="disabled",
         DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
     )
     def test_production_checks_block_insecure_deploy_defaults(self):
@@ -459,7 +464,6 @@ class TenantOnboardingPermissionTests(APITestCase):
             "accounts.E002",
             "accounts.E003",
             "accounts.E004",
-            "accounts.E005",
             "accounts.E008",
         }.issubset(ids))
         self.assertIn("accounts.W001", ids)
@@ -511,6 +515,7 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(account_issue_ids, set())
 
     @override_settings(
+        E_WAY_BILL_PROVIDER="disabled",
         PAYMENT_GATEWAY_PROVIDER="razorpay",
         RAZORPAY_KEY_ID="rzp_test_key",
         RAZORPAY_KEY_SECRET="razorpay-secret",
@@ -589,6 +594,7 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(workspace_response.data["staff"], [])
         self.assertEqual({row["mobile"] for row in workspace_response.data["users"]}, {"9000000001"})
 
+    @override_settings(DEBUG=True, DEMO_SESSION_ENABLED=True)
     def test_demo_session_sets_cookie_without_returning_refresh_token(self):
         business = Business.objects.create(name="CSM SILKS", phone="8608633066")
         self.make_user(business, "8608633066", "admin", "CSM")

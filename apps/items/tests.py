@@ -70,6 +70,27 @@ class ItemInventoryLifecycleTests(APITestCase):
         self.assertEqual(list_response.data[0]["color"], "MAROON")
         self.assertEqual(list_response.data[0]["secondary_unit"], "BOX")
 
+    def test_item_tracking_codes_auto_generate_from_business_category_and_color(self):
+        pants = ItemCategory.objects.create(business=self.business, name="PANTS")
+
+        self.auth_as(self.user)
+        response = self.client.post("/api/v1/items/items/", {
+            "name": "LINEN PANT",
+            "category": str(pants.id),
+            "godown": str(self.godown.id),
+            "selling_price": "1450.00",
+            "purchase_price": "900.00",
+            "gst_rate": 5,
+            "color": "BLACK",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        item = Item.objects.get(id=response.data["id"])
+        self.assertTrue(item.item_code.startswith("CSM-PAN-BLA-"))
+        self.assertEqual(item.barcode, item.item_code)
+        self.assertEqual(response.data["item_code"], item.item_code)
+        self.assertEqual(response.data["barcode"], item.barcode)
+
     def test_category_and_godown_must_belong_to_active_tenant(self):
         foreign_category = ItemCategory.objects.create(business=self.other_business, name="FOREIGN")
         foreign_godown = Godown.objects.create(business=self.other_business, name="Foreign Godown")

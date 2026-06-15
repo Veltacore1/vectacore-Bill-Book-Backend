@@ -4,10 +4,14 @@ This deploy bundle runs the real multi-tenant app with Postgres as the only data
 
 ## 1. Prepare Environment
 
-From the backend repo root:
-
 ```powershell
-Copy-Item .env.example .env
+Copy-Item deploy\.env.production.example .env
+```
+
+Or on Linux:
+
+```bash
+cp deploy/.env.production.example .env
 ```
 
 Edit `.env` and replace every placeholder secret. Production must use:
@@ -16,6 +20,7 @@ Edit `.env` and replace every placeholder secret. Production must use:
 DEBUG=False
 DEMO_SESSION_ENABLED=False
 CORS_ALLOW_ALL_ORIGINS=False
+CORS_ALLOWED_ORIGINS=https://app.vastrabook.in
 CSRF_TRUSTED_ORIGINS=https://app.vastrabook.in
 SECURE_SSL_REDIRECT=True
 SESSION_COOKIE_SECURE=True
@@ -26,10 +31,6 @@ SMS_PROVIDER=<real provider>
 EMAIL_PROVIDER=resend
 RESEND_API_KEY=<real Resend key>
 RESEND_FROM_EMAIL=<verified sender>
-E_INVOICE_PROVIDER=<real provider or disabled>
-E_WAY_BILL_PROVIDER=<real provider or disabled>
-E_WAY_BILL_API_URL=<real e-way bill API URL>
-E_WAY_BILL_API_TOKEN=<real e-way bill token>
 ```
 
 The frontend image must be built with a browser-reachable API URL, for example:
@@ -42,13 +43,32 @@ Set that GitHub Actions repository variable before publishing the frontend conta
 
 ## 2. Start The Stack
 
+### Option A: Separate subdomains (default)
+
+Frontend and backend each exposed on their own port. Use a load balancer or
+separate subdomains (e.g. `app.vastrabook.in` -> port 8080, `api.vastrabook.in` -> port 8001).
+
 ```powershell
 docker compose --env-file .env -f deploy/docker-compose.prod.yml pull
 docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
 docker compose --env-file .env -f deploy/docker-compose.prod.yml ps
 ```
 
-The backend service runs migrations before Gunicorn starts. Confirm health:
+### Option B: Single-server reverse proxy (recommended for VPS)
+
+A single nginx container serves the frontend SPA and proxies `/api/*` to the
+backend. Set `USE_REVERSE_PROXY=true` in `.env` and run:
+
+```powershell
+docker compose --env-file .env -f deploy/docker-compose.prod.yml pull
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile reverse-proxy up -d nginx-reverse-proxy
+```
+
+The reverse proxy listens on ports 80/443. For SSL, pair with a companion like
+Caddy, or mount certs and uncomment SSL lines in `deploy/nginx/reverse-proxy.conf`.
+
+### Health check
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8001/healthz
@@ -88,15 +108,29 @@ python .\deploy\smoke_check.py `
 
 The smoke check verifies backend `/healthz`, database reachability, backend security headers, frontend app shell, frontend CSP/cache/security headers, scoped `connect-src` for the expected API origin, immutable asset caching, and, when `--demo-mobile` is supplied, that demo login returns only an access token in JSON while the refresh token is set as an HttpOnly cookie. Use `--skip-frontend-security` only against a local Vite dev server, not a production Nginx deployment.
 
-## 4. Logs And Operations
+## 4. Seed Demo Data (Optional)
 
 ```powershell
+docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend python seed_data.py
+```
+
+## 5. Logs And Operations
+
+```powershell
+# Backend
 docker compose --env-file .env -f deploy/docker-compose.prod.yml logs -f backend
+
+# Celery worker (background tasks)
+docker compose --env-file .env -f deploy/docker-compose.prod.yml logs -f celery-worker
+
+# Django deployment checks
 docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend python manage.py check --deploy
+
+# Apply migrations
 docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend python manage.py migrate --noinput
 ```
 
-## 5. Backup Postgres
+## 6. Backup Postgres
 
 ```powershell
 .\deploy\backup_postgres.ps1
@@ -104,7 +138,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend py
 
 This creates a compressed `pg_dump` file in `deploy/backups`.
 
-## 6. Restore Postgres
+## 7. Restore Postgres
 
 Restoring replaces existing database objects. Take a fresh backup first.
 
@@ -116,4 +150,34 @@ For non-interactive restore jobs:
 
 ```powershell
 .\deploy\restore_postgres.ps1 -InputFile .\deploy\backups\vastrabook-YYYYMMDD-HHMMSS.dump -Yes
+```
+
+## Architecture
+
+```
+                         ┌──────────────┐
+                         │   Browser    │
+                         └──────┬───────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+             (Option A)              (Option B)
+       app.example.com          example.com
+       api.example.com              │
+                    │               │
+                    │    ┌──────────┴──────────┐
+                    │    │ nginx-reverse-proxy │
+                    │    │  (port 80/443)      │
+                    │    └──┬─────────────┬────┘
+                    │       │             │
+            ┌───────┴──┐  ┌┴──────┐  ┌───┴────┐
+            │ Frontend │  │Frontend│  │ Backend│
+            │ :8080    │  │ :80   │  │ :8001  │
+            └──────────┘  └───────┘  └────────┘
+                         ┌───────┐  ┌────────┐
+                         │ Redis │  │Postgres│
+                         └───────┘  └────────┘
+                         ┌──────────────┐
+                         │celery-worker │
+                         └──────────────┘
 ```

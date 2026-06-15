@@ -7,13 +7,19 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-csm-silks-billing-software-key-2026")
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+if not SECRET_KEY:
+    import warnings
+    warnings.warn(
+        "SECRET_KEY environment variable is not set. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(50))\""
+    )
 
-DEBUG = os.getenv("DEBUG", "True") == "True"
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv("ALLOWED_HOSTS", "*").split(",")
+    for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
 
@@ -27,6 +33,7 @@ INSTALLED_APPS = [
     
     # Third party packages
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "django_filters",
     
@@ -45,6 +52,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -84,11 +92,14 @@ DATABASES = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": os.getenv("DB_NAME", "csm_silks"),
         "USER": os.getenv("DB_USER", "csm_user"),
-        "PASSWORD": os.getenv("DB_PASSWORD", "csm_password"),
+        "PASSWORD": os.getenv("DB_PASSWORD", ""),
         "HOST": os.getenv("DB_HOST", "localhost"),
-        "PORT": os.getenv("DB_PORT", "5434"),
+        "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
+if not DATABASES["default"]["PASSWORD"]:
+    import warnings
+    warnings.warn("DB_PASSWORD environment variable is not set. Using empty password.")
 
 # Explicit opt-in SQLite fallback for one-off local checks.
 if os.getenv("USE_SQLITE", "False") == "True":
@@ -115,6 +126,8 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # CORS / CSRF configuration
@@ -140,7 +153,7 @@ def unique_origins(origins: list[str]) -> list[str]:
     return list(dict.fromkeys(origins))
 
 
-CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "True" if DEBUG else "False") == "True"
+CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True"
 CORS_ALLOWED_ORIGINS = csv_env("CORS_ALLOWED_ORIGINS")
 if DEBUG and not CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = unique_origins(CORS_ALLOWED_ORIGINS + LOCAL_DEV_ORIGINS)
@@ -162,6 +175,8 @@ SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0" if DEBUG else "31
 SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "False" if DEBUG else "True") == "True"
 SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "False") == "True"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 CSRF_TRUSTED_ORIGINS = csv_env("CSRF_TRUSTED_ORIGINS")
 if DEBUG:
     CSRF_TRUSTED_ORIGINS = unique_origins(CSRF_TRUSTED_ORIGINS + LOCAL_DEV_ORIGINS)
@@ -182,6 +197,9 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    # Pagination is set per-viewset via pagination_class attribute.
+    # High-volume endpoints (sales invoices, purchase invoices, items, parties)
+    # use StandardResultsSetPagination from apps.accounts.pagination.
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
@@ -249,7 +267,10 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": False,
+    "BLACKLIST_AFTER_ROTATION": True,
+
+    # Ensure SimpleJWT blacklist app is used
+    "TOKEN_BLACKLIST_ENABLED": True,
     "ALGORITHM": "HS256",
     "SIGNING_KEY": SECRET_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),

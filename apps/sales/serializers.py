@@ -142,11 +142,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         ]
 
     def validate_party(self, party):
-        request = self.context.get("request")
-        business = getattr(request, "business", None)
-        if business and (party.business_id != business.id or not party.is_active):
-            raise serializers.ValidationError("Select an active party from this business.")
-        return party
+        return _validate_business_party(self, party)
 
     def validate_line_items(self, line_items):
         request = self.context.get("request")

@@ -4,7 +4,7 @@ from django.utils import timezone
 from .models import (
     ItemCategory, Godown, Item, ItemGodownStock, StockMovement,
     GodownTransfer, PriceHistory, ItemPartyPrice, ItemOffer, BarcodeLabel, BARCODE_LABEL_SIZES,
-    apply_stock_movement, generate_barcode_svg
+    apply_stock_movement, generate_barcode_svg, make_item_tracking_code
 )
 from decimal import Decimal
 
@@ -118,7 +118,12 @@ class ItemSerializer(serializers.ModelSerializer):
             opening_stock = validated_data.get("opening_stock", Decimal("0.000"))
             validated_data["current_stock"] = opening_stock
 
-            item = Item.objects.create(business=business, **validated_data)
+            item = Item(business=business, **validated_data)
+            if not (item.item_code or "").strip():
+                item.item_code = make_item_tracking_code(business, item)
+            if not (item.barcode or "").strip():
+                item.barcode = item.item_code
+            item.save()
 
             if opening_stock > 0:
                 stock, movement = apply_stock_movement(
@@ -135,6 +140,23 @@ class ItemSerializer(serializers.ModelSerializer):
                 )
                 stock.opening_stock = opening_stock
                 stock.save(update_fields=["opening_stock", "updated_at"])
+
+        return item
+
+    def update(self, instance, validated_data):
+        item = super().update(instance, validated_data)
+        update_fields = []
+
+        if not (item.item_code or "").strip():
+            item.item_code = make_item_tracking_code(item.business, item)
+            update_fields.append("item_code")
+        if not (item.barcode or "").strip():
+            item.barcode = item.item_code
+            update_fields.append("barcode")
+
+        if update_fields:
+            update_fields.append("updated_at")
+            item.save(update_fields=update_fields)
 
         return item
 

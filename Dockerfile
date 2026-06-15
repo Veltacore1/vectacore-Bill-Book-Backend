@@ -23,6 +23,10 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
+# collectstatic imports settings (which requires SECRET_KEY); the real key is
+# injected at runtime via the k8s secret, so a throwaway value is fine here.
+RUN SECRET_KEY=build-time-collectstatic python manage.py collectstatic --noinput
+
 RUN adduser --disabled-password --gecos "" appuser \
   && chown -R appuser:appuser /app
 USER appuser
