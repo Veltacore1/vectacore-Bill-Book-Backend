@@ -50,7 +50,15 @@ services:
         condition: service_healthy
     expose:
       - 8001
-    command: sh -c "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8001 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile -"
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             if [ \"$$SEED_DEMO_DATA\" = \"True\" ]; then python manage.py seed_demo_data; fi &&
+             gunicorn config.wsgi:application
+             --bind 0.0.0.0:8001
+             --workers ${GUNICORN_WORKERS:-3}
+             --timeout ${GUNICORN_TIMEOUT:-120}
+             --access-logfile -
+             --error-logfile -"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/healthz >/dev/null"]
       interval: 30s

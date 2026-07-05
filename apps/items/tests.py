@@ -1,5 +1,7 @@
+from datetime import timedelta
 from decimal import Decimal
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -208,13 +210,14 @@ class ItemInventoryLifecycleTests(APITestCase):
         )
 
         self.auth_as(self.user)
+        today = timezone.localdate()
         create_response = self.client.post("/api/v1/items/offers/", {
             "item": str(item.id),
             "title": "Festival Silk Offer",
             "discount_type": "percent",
             "discount_value": "10.00",
-            "starts_on": "2026-06-01",
-            "ends_on": "2026-06-30",
+            "starts_on": (today - timedelta(days=7)).isoformat(),
+            "ends_on": (today + timedelta(days=30)).isoformat(),
             "channel": "billing",
             "status": "active",
             "notes": "Counter launch offer",

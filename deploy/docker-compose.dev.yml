@@ -1,0 +1,56 @@
+# Full-stack dev compose — clone frontend as a sibling of this repo, or use the monorepo layout.
+# From repo root with backend/ and frontend/ folders:
+#   docker compose -f backend/deploy/docker-compose.dev.yml up -d --build
+
+name: vastrabook-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: csm_silks
+      POSTGRES_USER: csm_user
+      POSTGRES_PASSWORD: csm_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - vastrabook_dev_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U csm_user -d csm_silks"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env.example
+    environment:
+      DEBUG: "True"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: csm_silks
+      DB_USER: csm_user
+      DB_PASSWORD: csm_password
+      DEMO_SESSION_ENABLED: "True"
+      SEED_DEMO_DATA: "True"
+      CORS_ALLOW_ALL_ORIGINS: "True"
+    ports:
+      - "8001:8001"
+    volumes:
+      - ..:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt &&
+             python manage.py migrate --noinput &&
+             if [ \"$$SEED_DEMO_DATA\" = \"True\" ]; then python manage.py seed_demo_data; fi &&
+             python manage.py runserver 0.0.0.0:8001"
+
+volumes:
+  vastrabook_dev_pg:

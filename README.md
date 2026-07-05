@@ -4,9 +4,12 @@ Django REST backend for **VastraBook by Veltacore**, a multi-tenant textile bill
 
 ## Local Setup
 
+Requires **Python 3.12** (see `.python-version`). Python 3.14 is not supported because `django-filter` still relies on removed stdlib APIs.
+
 ```bash
 pip install -r requirements.txt
 python manage.py migrate
+python manage.py seed_demo_data
 python manage.py runserver 127.0.0.1:8001
 ```
 

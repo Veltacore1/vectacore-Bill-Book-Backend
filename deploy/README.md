@@ -19,6 +19,7 @@ Edit `.env` and replace every placeholder secret. Production must use:
 ```text
 DEBUG=False
 DEMO_SESSION_ENABLED=False
+SEED_DEMO_DATA=False
 CORS_ALLOW_ALL_ORIGINS=False
 CORS_ALLOWED_ORIGINS=https://app.vastrabook.in
 CSRF_TRUSTED_ORIGINS=https://app.vastrabook.in
@@ -32,6 +33,8 @@ EMAIL_PROVIDER=resend
 RESEND_API_KEY=<real Resend key>
 RESEND_FROM_EMAIL=<verified sender>
 ```
+
+Set `SEED_DEMO_DATA=True` only for demo/staging deployments that need the CSM SILKS tenant auto-seeded after migrations.
 
 The frontend image must be built with a browser-reachable API URL, for example:
 
@@ -136,6 +139,12 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml exec backend py
 .\deploy\backup_postgres.ps1
 ```
 
+Linux/macOS:
+
+```bash
+./deploy/backup_postgres.sh
+```
+
 This creates a compressed `pg_dump` file in `deploy/backups`.
 
 ## 7. Restore Postgres
@@ -144,6 +153,12 @@ Restoring replaces existing database objects. Take a fresh backup first.
 
 ```powershell
 .\deploy\restore_postgres.ps1 -InputFile .\deploy\backups\vastrabook-YYYYMMDD-HHMMSS.dump
+```
+
+Linux/macOS:
+
+```bash
+CONFIRM_RESTORE=RESTORE ./deploy/restore_postgres.sh ./deploy/backups/vastrabook-YYYYMMDD-HHMMSS.dump
 ```
 
 For non-interactive restore jobs:
