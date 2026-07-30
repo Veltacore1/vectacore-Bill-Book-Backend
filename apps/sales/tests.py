@@ -271,6 +271,64 @@ class SalesInvoiceSettingsTests(APITestCase):
         self.assertEqual(invoice.party.business, self.business)
         self.assertEqual(PaymentIn.objects.get(reference_number=invoice.invoice_number).party, invoice.party)
 
+    def _base_line_item(self, **overrides):
+        line = {
+            "item": str(self.item.id),
+            "item_name": self.item.name,
+            "item_code": self.item.item_code,
+            "hsn_code": self.item.hsn_code,
+            "unit": "PCS",
+            "quantity": "1.000",
+            "free_quantity": "0.000",
+            "mrp": "1200.00",
+            "rate": "1000.00",
+            "discount_pct": "0.00",
+            "discount_amount": "0.00",
+            "gst_rate": "5.00",
+            "taxable_amount": "1000.00",
+            "tax_amount": "50.00",
+            "amount": "1050.00",
+            "sort_order": 0,
+        }
+        line.update(overrides)
+        return line
+
+    def _base_invoice_payload(self, line_item):
+        return {
+            "party": str(self.party.id),
+            "subtotal": "1000.00",
+            "discount_amount": "0.00",
+            "discount_pct": "0.00",
+            "taxable_amount": "1000.00",
+            "cgst_amount": "25.00",
+            "sgst_amount": "25.00",
+            "igst_amount": "0.00",
+            "cess_amount": "0.00",
+            "additional_charges": "0.00",
+            "total_amount": "1050.00",
+            "paid_amount": "0.00",
+            "payment_mode": "cash",
+            "place_of_supply": "Tamil Nadu",
+            "line_items": [line_item],
+        }
+
+    def test_invoice_rejects_zero_quantity_line_item(self):
+        response = self.client.post(
+            "/api/v1/sales/invoices/",
+            self._base_invoice_payload(self._base_line_item(quantity="0.000")),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(SalesInvoice.objects.filter(subtotal=1000, taxable_amount=1000).exists())
+
+    def test_invoice_rejects_negative_rate_line_item(self):
+        response = self.client.post(
+            "/api/v1/sales/invoices/",
+            self._base_invoice_payload(self._base_line_item(rate="-100.00")),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 class SalesInvoiceLifecycleTests(APITestCase):
     def setUp(self):
