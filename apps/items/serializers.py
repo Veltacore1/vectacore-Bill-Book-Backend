@@ -110,6 +110,43 @@ class ItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Choose a godown from the active tenant.")
         return value
 
+    def validate_selling_price(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Selling price cannot be negative.")
+        return value
+
+    def validate_purchase_price(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Purchase price cannot be negative.")
+        return value
+
+    def validate_mrp(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("MRP cannot be negative.")
+        return value
+
+    def validate_wholesale_price(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Wholesale price cannot be negative.")
+        return value
+
+    def validate_cess_rate(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Cess rate cannot be negative.")
+        return value
+
+    def validate_opening_stock(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Opening stock cannot be negative.")
+        return value
+
+    def validate_gst_rate(self, value):
+        valid_rates = {Decimal(str(rate)) for rate, _ in Item.GST_RATE_CHOICES}
+        if value not in valid_rates:
+            allowed = ", ".join(str(rate) for rate, _ in Item.GST_RATE_CHOICES)
+            raise serializers.ValidationError(f"GST rate must be one of: {allowed}.")
+        return value
+
     def create(self, validated_data):
         request = self.context["request"]
         business = request.business
