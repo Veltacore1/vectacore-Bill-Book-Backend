@@ -120,3 +120,27 @@ class PartiesSharedLedgerTests(APITestCase):
         list_response = self.client.get("/api/v1/parties/parties/")
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data, [])
+
+    def test_party_rejects_negative_opening_balance_credit_limit_and_days(self):
+        business = Business.objects.create(name="Validation Tenant", phone="9100000020")
+        user = self.make_user(business, "9100000021")
+        self.auth_as(user)
+
+        negative_balance_response = self.client.post("/api/v1/parties/parties/", {
+            "name": "NEGATIVE BALANCE PARTY",
+            "party_type": "customer",
+            "opening_balance": "-500.00",
+        }, format="json")
+        self.assertEqual(negative_balance_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("opening_balance", negative_balance_response.data)
+        self.assertFalse(Party.objects.filter(name="NEGATIVE BALANCE PARTY").exists())
+
+        negative_credit_response = self.client.post("/api/v1/parties/parties/", {
+            "name": "NEGATIVE CREDIT PARTY",
+            "party_type": "customer",
+            "credit_limit": "-1000.00",
+            "credit_days": -5,
+        }, format="json")
+        self.assertEqual(negative_credit_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("credit_limit", negative_credit_response.data)
+        self.assertIn("credit_days", negative_credit_response.data)

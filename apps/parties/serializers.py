@@ -32,6 +32,21 @@ class PartySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Choose a category from the active tenant.")
         return value
 
+    def validate_opening_balance(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Opening balance cannot be negative.")
+        return value
+
+    def validate_credit_limit(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Credit limit cannot be negative.")
+        return value
+
+    def validate_credit_days(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Credit days cannot be negative.")
+        return value
+
     def create(self, validated_data):
         business = self.context["request"].business
         party = Party.objects.create(business=business, **validated_data)
