@@ -118,6 +118,44 @@ class ItemInventoryLifecycleTests(APITestCase):
         }, format="json")
         self.assertEqual(godown_response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_item_rejects_negative_prices_and_invalid_gst_rate(self):
+        self.auth_as(self.user)
+
+        negative_price_response = self.client.post("/api/v1/items/items/", {
+            "name": "NEGATIVE PRICE ITEM",
+            "category": str(self.category.id),
+            "godown": str(self.godown.id),
+            "selling_price": "-50.00",
+            "purchase_price": "8.00",
+            "gst_rate": 5,
+        }, format="json")
+        self.assertEqual(negative_price_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("selling_price", negative_price_response.data)
+        self.assertFalse(Item.objects.filter(name="NEGATIVE PRICE ITEM").exists())
+
+        negative_stock_response = self.client.post("/api/v1/items/items/", {
+            "name": "NEGATIVE STOCK ITEM",
+            "category": str(self.category.id),
+            "godown": str(self.godown.id),
+            "selling_price": "10.00",
+            "purchase_price": "8.00",
+            "gst_rate": 5,
+            "opening_stock": "-1.000",
+        }, format="json")
+        self.assertEqual(negative_stock_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("opening_stock", negative_stock_response.data)
+
+        invalid_gst_response = self.client.post("/api/v1/items/items/", {
+            "name": "INVALID GST ITEM",
+            "category": str(self.category.id),
+            "godown": str(self.godown.id),
+            "selling_price": "10.00",
+            "purchase_price": "8.00",
+            "gst_rate": "13.50",
+        }, format="json")
+        self.assertEqual(invalid_gst_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("gst_rate", invalid_gst_response.data)
+
     def test_delete_item_soft_deletes_inside_active_tenant(self):
         item = Item.objects.create(
             business=self.business,
