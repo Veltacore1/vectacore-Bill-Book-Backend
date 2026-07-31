@@ -57,6 +57,39 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "invoice_number", "created_by", "created_at", "updated_at"]
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        business = getattr(request, "business", None)
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        total_amount = Decimal(str(attrs.get("total_amount", getattr(self.instance, "total_amount", 0)) or 0))
+        paid_amount = Decimal(str(attrs.get("paid_amount", getattr(self.instance, "paid_amount", 0)) or 0))
+        line_items = attrs.get("line_items")
+
+        if not party:
+            raise serializers.ValidationError({"party": "Select a supplier before saving the invoice."})
+        if total_amount <= 0:
+            raise serializers.ValidationError({"total_amount": "Invoice total must be greater than zero."})
+        if paid_amount < 0:
+            raise serializers.ValidationError({"paid_amount": "Paid amount cannot be negative."})
+        if paid_amount > total_amount:
+            raise serializers.ValidationError({"paid_amount": "Paid amount cannot be greater than invoice total."})
+
+        if line_items is not None:
+            if not line_items:
+                raise serializers.ValidationError("Add at least one item before saving this invoice.")
+            for index, line_item in enumerate(line_items, start=1):
+                item = line_item.get("item")
+                if item and business and item.business_id != business.id:
+                    raise serializers.ValidationError(f"Line {index}: select an active item from this business.")
+                if Decimal(str(line_item.get("quantity") or 0)) <= 0:
+                    raise serializers.ValidationError(f"Line {index}: quantity must be greater than zero.")
+                if Decimal(str(line_item.get("rate") or 0)) < 0:
+                    raise serializers.ValidationError(f"Line {index}: rate cannot be negative.")
+                if Decimal(str(line_item.get("amount") or 0)) < 0:
+                    raise serializers.ValidationError(f"Line {index}: amount cannot be negative.")
+
+        return attrs
+
     def create(self, validated_data):
         request = self.context["request"]
         business = request.business

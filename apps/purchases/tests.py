@@ -117,6 +117,50 @@ class PurchaseLifecycleAuditTests(APITestCase):
             ).exists()
         )
 
+    def test_purchase_invoice_rejects_zero_quantity_and_negative_rate_line_items(self):
+        zero_qty_response = self.client.post("/api/v1/purchases/invoices/", {
+            "party": str(self.supplier.id),
+            "subtotal": "1800.00",
+            "taxable_amount": "1800.00",
+            "total_amount": "1800.00",
+            "paid_amount": "0.00",
+            "line_items": [self._line_item(quantity="0.000")],
+        }, format="json")
+        self.assertEqual(zero_qty_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PurchaseInvoice.objects.filter(business=self.business, subtotal="1800.00").exists())
+
+        negative_rate_line = self._line_item()
+        negative_rate_line["rate"] = "-900.00"
+        negative_rate_response = self.client.post("/api/v1/purchases/invoices/", {
+            "party": str(self.supplier.id),
+            "subtotal": "1800.00",
+            "taxable_amount": "1800.00",
+            "total_amount": "1800.00",
+            "paid_amount": "0.00",
+            "line_items": [negative_rate_line],
+        }, format="json")
+        self.assertEqual(negative_rate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_purchase_invoice_rejects_missing_party_and_non_positive_total(self):
+        no_party_response = self.client.post("/api/v1/purchases/invoices/", {
+            "subtotal": "1800.00",
+            "taxable_amount": "1800.00",
+            "total_amount": "1800.00",
+            "paid_amount": "0.00",
+            "line_items": [self._line_item()],
+        }, format="json")
+        self.assertEqual(no_party_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        zero_total_response = self.client.post("/api/v1/purchases/invoices/", {
+            "party": str(self.supplier.id),
+            "subtotal": "0.00",
+            "taxable_amount": "0.00",
+            "total_amount": "0.00",
+            "paid_amount": "0.00",
+            "line_items": [self._line_item()],
+        }, format="json")
+        self.assertEqual(zero_total_response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_purchase_invoice_and_payment_numbers_continue_from_existing_documents(self):
         fy = self._current_fy()
         PurchaseInvoice.objects.create(
