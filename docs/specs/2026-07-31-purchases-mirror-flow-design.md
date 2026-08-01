@@ -37,17 +37,19 @@ Identical to Milestone 1: root-cause via systematic-debugging, minimal fix in th
 
 ## Acceptance criteria
 
-- [ ] Fresh demo tenant: create Item → create supplier Party → create Purchase Invoice referencing both with correct GST math → record Payment Out (full or partial) → invoice status transitions correctly → item stock increases by the purchased quantity → Dashboard/Reports reflect the new purchase and payment.
-- [ ] Zero unhandled browser console errors through the flow.
-- [ ] A Playwright spec exists that exercises this exact flow and passes.
-- [ ] Every bug found is listed in the appendix with its fix commit.
-- [ ] All existing e2e specs still pass (except the pre-existing, still-deferred Shared Ledger failure).
-- [ ] `python manage.py check --deploy` shows no new warnings.
+- [x] Fresh demo tenant: create Item → create supplier Party → create Purchase Invoice referencing both with correct GST math → record Payment Out (full or partial) → invoice status transitions correctly → item stock increases by the purchased quantity → Dashboard/Reports reflect the new purchase and payment. Verified live: Item+Party 201, Invoice 201 with reconciled GST, Payment Out 201 via FIFO settlement across multiple invoices (math verified by hand), stock increase already covered by an existing backend test, Dashboard "Latest Transactions" and Reports "Party Ledger" both reflect the new data with zero console errors.
+- [x] Zero unhandled browser console errors through the flow. Confirmed by `e2e/purchases-mirror-flow.spec.ts`.
+- [x] A Playwright spec exists that exercises this exact flow and passes. `e2e/purchases-mirror-flow.spec.ts` (frontend commit `8c2f4a1`).
+- [x] Every bug found is listed in the appendix with its fix commit.
+- [x] All existing e2e specs still pass (except the pre-existing, still-deferred Shared Ledger failure). Confirmed: 11/12 green, same single pre-existing failure as Milestone 1, no new regressions.
+- [x] `python manage.py check --deploy` shows no new warnings. Same 5 intentional local-dev warnings as Milestone 1.
 
 ## Appendix: Bug log
 
-_To be filled in during discovery._
-
 | # | Stage | Bug | Evidence | Root cause | Fix commit |
 |---|-------|-----|----------|------------|------------|
-| _(none yet — discovery not started)_ | | | | | |
+| 1 | Purchase Invoice | CGST + SGST could sum to ₹0.01 more than the invoice's own total_amount | Real invoice created with amount=101 at 5% GST gave cgst=2.53 + sgst=2.53 = 5.06 against a total only accounting for 5.05 | Copy-pasted from `api/sales.ts` before that file's Milestone 1 fix - both cgst/sgst rounded independently via two separate `roundMoney(taxTotal / 2)` calls | frontend `10099af` |
+| 2 | Purchase Invoice | `PurchaseInvoiceSerializer` had no validation at all - no supplier required, zero/negative total accepted, paid_amount could exceed total, line items could have zero quantity or negative rate | Code review + confirmed via new regression tests: `POST` with a zero-quantity or negative-rate line item, or no party, or a non-positive total all returned `201` before the fix | `SalesInvoiceSerializer` (its sales-side mirror) already had this validation; it was simply never added to the purchase side | backend `52d549f` |
+| 3 | Purchase Invoice / Payment Out | Failed saves showed no error at all inside the create modal - same class of bug as Milestone 1's Items/Parties fix | Confirmed: `syncNotice` only rendered in the list page's action strip, invisible behind the modal backdrop | Notice never passed into the shared create-modal JSX (same component serves Purchase Invoice, Payment Out, Purchase Return, Debit Note, Purchase Orders) | frontend `10099af` |
+| 4 | Purchases + Sales registers | Any open "Create X" modal (Purchase Invoice, Payment Out, Quotation, Payment In, Sales Return, Credit Note, Delivery Challan, Proforma) silently closed and wiped in-progress form input roughly every 15 seconds | Reproduced via Playwright trace: the Amount Paid input in Create Payment Out was caught in a continuous mount/unmount loop for the full length of a slow interaction ("element was detached from the DOM, retrying") | A reset `useEffect` keyed on `[view, parties, items]` unconditionally called `setShowCreate(false)` and reset the draft; `parties`/`items` get a new array reference on every workspace refresh (incl. the ~15s realtime poll) even when the data is unchanged | frontend `475be0f` (fixed identically in both `Purchases.tsx` and `SalesRegisters.tsx`) |
+| 5 | Reports (whole tenant, not purchases-specific) | The entire Reports screen 500'd for any tenant with even one item lacking an HSN code - not just the HSN Summary report, all of them, since they're built in one payload call | `GET /api/v1/accounting/reports/` → 500, backend traceback: `TypeError: '<' not supported between instances of 'NoneType' and 'str'` at `sorted(set(hsn_sales.keys()) \| set(hsn_purchases.keys()))` | The sales-side HSN key derivation already falls back to `"NA"` when `hsn_code` is `None`; the purchase-side equivalent line was missing that same `or "NA"` fallback, so a purchased item with no HSN code left a raw `None` key mixed into a `sorted()` call | backend `236ebc8` |
