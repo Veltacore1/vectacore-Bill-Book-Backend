@@ -272,6 +272,47 @@ class ReportsExportTests(APITestCase):
         self.assertEqual(item_profit["rows"][0][0], "BASIC-GFC6-9ATM00")
         self.assertIn("\u20b9 250.00", item_profit["rows"][0])
 
+    def test_reports_do_not_crash_when_a_purchased_item_has_no_hsn_code(self):
+        no_hsn_item = Item.objects.create(
+            business=self.business,
+            godown=self.godown,
+            name="LOOSE THREAD SPOOL",
+            item_code="NOHSN-001",
+            hsn_code=None,
+            unit="PCS",
+            selling_price=Decimal("50.00"),
+            purchase_price=Decimal("30.00"),
+            current_stock=Decimal("10.000"),
+        )
+        no_hsn_purchase = PurchaseInvoice.objects.create(
+            business=self.business,
+            invoice_number="PUR/26-27/0002",
+            party=self.supplier,
+            subtotal=Decimal("30.00"),
+            taxable_amount=Decimal("30.00"),
+            total_amount=Decimal("30.00"),
+            status="unpaid",
+        )
+        PurchaseInvoiceItem.objects.create(
+            invoice=no_hsn_purchase,
+            item=no_hsn_item,
+            item_name=no_hsn_item.name,
+            quantity=Decimal("1.000"),
+            rate=Decimal("30.00"),
+            gst_rate=Decimal("0.00"),
+            taxable_amount=Decimal("30.00"),
+            amount=Decimal("30.00"),
+        )
+
+        self.auth_as(self.user)
+        response = self.client.get("/api/v1/accounting/reports/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        hsn_summary = next(report for report in response.data["reports"] if report["id"] == "hsn-summary")
+        hsn_labels = {row[0] for row in hsn_summary["rows"]}
+        self.assertIn("NA", hsn_labels)
+        self.assertIn("50072010", hsn_labels)
+
     def test_report_exports_are_generated_server_side_and_tenant_scoped(self):
         self.auth_as(self.user)
 

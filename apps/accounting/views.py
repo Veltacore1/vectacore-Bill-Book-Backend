@@ -486,7 +486,7 @@ class ReportsView(APIView):
             tax_summary[str(line.gst_rate)]["sales_taxable"] += line.taxable_amount
             tax_summary[str(line.gst_rate)]["sales_tax"] += line.tax_amount
         for line in purchase_lines:
-            hsn = line.item.hsn_code if line.item else "NA"
+            hsn = (line.item.hsn_code if line.item else "NA") or "NA"
             purchase_tax = line.amount - line.taxable_amount
             hsn_purchases[hsn]["qty"] += line.quantity
             hsn_purchases[hsn]["taxable"] += line.taxable_amount
