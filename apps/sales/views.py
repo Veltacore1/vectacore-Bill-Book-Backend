@@ -2,6 +2,7 @@ import uuid
 import json
 import urllib.error
 import urllib.request
+from decimal import Decimal
 from io import BytesIO
 from html import escape
 from rest_framework import viewsets, permissions, status
@@ -108,23 +109,28 @@ def _post_provider_json(path, payload):
 
 
 def _invoice_line_from_register_line(line_item):
-    amount = float(line_item.amount)
+    quantity = Decimal(str(line_item.quantity))
+    rate = Decimal(str(line_item.rate))
+    gst_rate = Decimal(str(line_item.gst_rate or 0))
+    taxable = (quantity * rate).quantize(Decimal("0.01"))
+    tax = (taxable * gst_rate / Decimal("100")).quantize(Decimal("0.01"))
+    amount = taxable + tax
     return {
         "item": line_item.item.id if line_item.item else None,
         "item_name": line_item.item_name,
         "item_code": line_item.item.item_code if line_item.item else "",
         "hsn_code": line_item.item.hsn_code if line_item.item else "",
         "unit": line_item.item.unit if line_item.item else "PCS",
-        "quantity": float(line_item.quantity),
+        "quantity": float(quantity),
         "free_quantity": 0,
         "mrp": float(line_item.item.mrp or line_item.rate) if line_item.item else float(line_item.rate),
-        "rate": float(line_item.rate),
+        "rate": float(rate),
         "discount_pct": 0,
         "discount_amount": 0,
-        "gst_rate": float(line_item.gst_rate),
-        "taxable_amount": amount,
-        "tax_amount": 0,
-        "amount": amount,
+        "gst_rate": float(gst_rate),
+        "taxable_amount": float(taxable),
+        "tax_amount": float(tax),
+        "amount": float(amount),
     }
 
 
@@ -139,7 +145,6 @@ def _convert_sales_register_voucher_to_invoice(
     pk,
     source_label,
     number_attr,
-    subtotal_attr=None,
     terms_attr=None,
 ):
     with transaction.atomic():
@@ -177,14 +182,26 @@ def _convert_sales_register_voucher_to_invoice(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        line_payloads = [_invoice_line_from_register_line(line_item) for line_item in line_items]
+        total_taxable = sum((Decimal(str(line["taxable_amount"])) for line in line_payloads), Decimal("0"))
+        total_tax = sum((Decimal(str(line["tax_amount"])) for line in line_payloads), Decimal("0"))
+        # Round CGST then derive SGST by subtraction so the two always sum to
+        # exactly total_tax (see the identical fix in api/sales.ts).
+        cgst_amount = total_tax.quantize(Decimal("0.01")) / 2
+        cgst_amount = cgst_amount.quantize(Decimal("0.01"))
+        sgst_amount = total_tax - cgst_amount
+        total_amount = total_taxable + total_tax
+
         invoice_data = {
             "party": str(source.party_id),
-            "subtotal": float(getattr(source, subtotal_attr or "total_amount", source.total_amount) or 0),
-            "taxable_amount": float(getattr(source, subtotal_attr or "total_amount", source.total_amount) or 0),
-            "total_amount": float(source.total_amount),
+            "subtotal": float(total_taxable),
+            "taxable_amount": float(total_taxable),
+            "cgst_amount": float(cgst_amount),
+            "sgst_amount": float(sgst_amount),
+            "total_amount": float(total_amount),
             "paid_amount": 0,
             "notes": f"Converted from {source_label} No: {source_number}",
-            "line_items": [_invoice_line_from_register_line(line_item) for line_item in line_items],
+            "line_items": line_payloads,
         }
         if terms_attr and hasattr(source, terms_attr):
             invoice_data["terms"] = getattr(source, terms_attr) or ""
@@ -1080,7 +1097,6 @@ class QuotationViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
             pk=pk,
             source_label="Quotation",
             number_attr="quotation_number",
-            subtotal_attr="subtotal",
             terms_attr="terms",
         )
 

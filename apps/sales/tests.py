@@ -836,6 +836,59 @@ class SalesRegisterConversionTests(APITestCase):
         self.assertEqual(str(stock.current_stock), "7.000")
         self.assertEqual(SalesInvoice.objects.filter(business=self.business).count(), 3)
 
+    def test_register_voucher_conversion_computes_gst_from_line_items(self):
+        # self.item is deliberately 0% GST elsewhere in this class, which
+        # means it can never catch a broken tax calculation (0 x anything is
+        # still 0). Use a real GST rate here so a regression is actually
+        # detectable.
+        taxed_item = Item.objects.create(
+            business=self.business,
+            name="Taxed Silk Saree",
+            item_code="CNV-SILK-002",
+            hsn_code="50072010",
+            selling_price=1000,
+            purchase_price=700,
+            gst_rate=5,
+            current_stock=10,
+            godown=self.godown,
+        )
+        ItemGodownStock.objects.create(
+            business=self.business,
+            item=taxed_item,
+            godown=self.godown,
+            opening_stock=10,
+            current_stock=10,
+        )
+        response = self.client.post("/api/v1/sales/quotations/", {
+            "party": str(self.party.id),
+            "subtotal": "1000.00",
+            "total_amount": "1050.00",
+            "line_items": [{
+                "item": str(taxed_item.id),
+                "item_name": taxed_item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "5.00",
+                "amount": "1050.00",
+                "sort_order": 0,
+            }],
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # The quotation itself has no cgst/sgst fields, so its own total is
+        # only asserted at the API-payload level (frontend responsibility);
+        # the invariant that actually matters is what conversion produces.
+
+        convert_response = self.client.post(
+            f"/api/v1/sales/quotations/{response.data['id']}/convert_to_invoice/", {}, format="json"
+        )
+        self.assertEqual(convert_response.status_code, status.HTTP_201_CREATED)
+        invoice = convert_response.data["invoice"]
+        self.assertEqual(invoice["taxable_amount"], "1000.00")
+        cgst = Decimal(invoice["cgst_amount"])
+        sgst = Decimal(invoice["sgst_amount"])
+        self.assertEqual(cgst + sgst, Decimal("50.00"))
+        self.assertEqual(invoice["total_amount"], "1050.00")
+
     def test_duplicate_conversion_is_rejected_without_second_invoice(self):
         voucher = self._create_register_voucher("quotation")
         first = self.client.post(f"/api/v1/sales/quotations/{voucher['id']}/convert_to_invoice/", {}, format="json")
