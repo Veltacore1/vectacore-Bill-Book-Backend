@@ -126,6 +126,11 @@ class AutomatedBillSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "business", "created_at"]
 
+    def validate_amount(self, amount):
+        if amount <= 0:
+            raise serializers.ValidationError("Bill amount must be greater than zero.")
+        return amount
+
     def create(self, validated_data):
         validated_data["business"] = self.context["request"].business
         return AutomatedBill.objects.create(**validated_data)

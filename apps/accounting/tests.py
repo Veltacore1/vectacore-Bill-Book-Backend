@@ -8,7 +8,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import Business, User
-from apps.accounting.models import BankAccount, BankTransaction, Expense, ReportShare
+from apps.accounting.models import AutomatedBill, BankAccount, BankTransaction, Expense, ReportShare
 from apps.items.models import Godown, Item, StockMovement
 from apps.parties.models import Party
 from apps.payments.models import PaymentIn, PaymentOut
@@ -159,6 +159,47 @@ class BankTransactionLifecycleTests(APITestCase):
         self.other_account.refresh_from_db()
         self.assertEqual(self.account.current_balance, Decimal("1000.00"))
         self.assertEqual(self.other_account.current_balance, Decimal("500.00"))
+
+
+class AutomatedBillTests(APITestCase):
+    def setUp(self):
+        self.business = Business.objects.create(name="Bill Tenant", phone="9000000904")
+        self.user = User.objects.create_user(
+            mobile="9000000905",
+            business=self.business,
+            role="admin",
+            first_name="Bill Admin",
+            is_active=True,
+        )
+        token = RefreshToken.for_user(self.user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def test_automated_bill_rejects_zero_and_negative_amount(self):
+        zero_response = self.client.post("/api/v1/accounting/recurring-bills/", {
+            "bill_name": "Zero Rent",
+            "amount": "0.00",
+            "frequency": "monthly",
+            "next_due_date": "2026-09-01",
+        }, format="json")
+        self.assertEqual(zero_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        negative_response = self.client.post("/api/v1/accounting/recurring-bills/", {
+            "bill_name": "Negative Rent",
+            "amount": "-500.00",
+            "frequency": "monthly",
+            "next_due_date": "2026-09-01",
+        }, format="json")
+        self.assertEqual(negative_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(AutomatedBill.objects.filter(business=self.business).count(), 0)
+
+        valid_response = self.client.post("/api/v1/accounting/recurring-bills/", {
+            "bill_name": "Showroom Rent",
+            "amount": "15000.00",
+            "frequency": "monthly",
+            "next_due_date": "2026-09-01",
+        }, format="json")
+        self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
 
 
 class ReportsExportTests(APITestCase):
