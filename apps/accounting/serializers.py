@@ -103,6 +103,19 @@ class ExpenseSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "business", "expense_number", "created_by", "created_at"]
 
+    def validate(self, attrs):
+        total_amount = attrs.get("total_amount", getattr(self.instance, "total_amount", None))
+        paid_amount = attrs.get("paid_amount", getattr(self.instance, "paid_amount", 0))
+
+        if total_amount is not None and total_amount <= 0:
+            raise serializers.ValidationError({"total_amount": "Expense amount must be greater than zero."})
+        if paid_amount is not None and paid_amount < 0:
+            raise serializers.ValidationError({"paid_amount": "Paid amount cannot be negative."})
+        if total_amount is not None and paid_amount is not None and paid_amount > total_amount:
+            raise serializers.ValidationError({"paid_amount": "Paid amount cannot be greater than the expense amount."})
+
+        return attrs
+
     def create(self, validated_data):
         request = self.context["request"]
         business = request.business

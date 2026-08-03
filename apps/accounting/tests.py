@@ -202,6 +202,55 @@ class AutomatedBillTests(APITestCase):
         self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
 
 
+class ExpenseValidationTests(APITestCase):
+    def setUp(self):
+        self.business = Business.objects.create(name="Expense Tenant", phone="9000000906")
+        self.user = User.objects.create_user(
+            mobile="9000000907",
+            business=self.business,
+            role="admin",
+            first_name="Expense Admin",
+            is_active=True,
+        )
+        token = RefreshToken.for_user(self.user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def test_expense_rejects_non_positive_and_overpaid_amounts(self):
+        zero_response = self.client.post("/api/v1/accounting/expenses/", {
+            "expense_category": "Zero Test",
+            "total_amount": "0.00",
+            "paid_amount": "0.00",
+            "payment_mode": "cash",
+        }, format="json")
+        self.assertEqual(zero_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        negative_response = self.client.post("/api/v1/accounting/expenses/", {
+            "expense_category": "Negative Test",
+            "total_amount": "-500.00",
+            "paid_amount": "0.00",
+            "payment_mode": "cash",
+        }, format="json")
+        self.assertEqual(negative_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        overpaid_response = self.client.post("/api/v1/accounting/expenses/", {
+            "expense_category": "Overpaid Test",
+            "total_amount": "100.00",
+            "paid_amount": "500.00",
+            "payment_mode": "cash",
+        }, format="json")
+        self.assertEqual(overpaid_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(Expense.objects.filter(business=self.business).count(), 0)
+
+        valid_response = self.client.post("/api/v1/accounting/expenses/", {
+            "expense_category": "Tea and Snacks",
+            "total_amount": "250.00",
+            "paid_amount": "250.00",
+            "payment_mode": "cash",
+        }, format="json")
+        self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
+
+
 class ReportsExportTests(APITestCase):
     def auth_as(self, user):
         token = RefreshToken.for_user(user).access_token
