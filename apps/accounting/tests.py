@@ -96,6 +96,70 @@ class BankTransactionLifecycleTests(APITestCase):
         self.assertEqual(self.other_account.current_balance, Decimal("500.00"))
         self.assertEqual(BankTransaction.objects.filter(business=self.business).count(), 0)
 
+    def test_bank_transfer_moves_balance_between_accounts_and_records_both_legs(self):
+        second_account = BankAccount.objects.create(
+            business=self.business,
+            account_name="Secondary Bank",
+            account_number="BANK-3",
+            ifsc_code="BANK0003",
+            bank_name="Secondary Bank",
+            opening_balance=Decimal("0.00"),
+            current_balance=Decimal("0.00"),
+        )
+
+        response = self.client.post("/api/v1/accounting/accounts/transfer/", {
+            "from_account": str(self.account.id),
+            "to_account": str(second_account.id),
+            "amount": "300.00",
+            "description": "Move to secondary",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.account.refresh_from_db()
+        second_account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("700.00"))
+        self.assertEqual(second_account.current_balance, Decimal("300.00"))
+        self.assertEqual(
+            BankTransaction.objects.filter(bank_account=self.account, transaction_type="withdrawal").count(), 1
+        )
+        self.assertEqual(
+            BankTransaction.objects.filter(bank_account=second_account, transaction_type="deposit").count(), 1
+        )
+
+    def test_bank_transfer_rejects_same_account_non_positive_amount_and_cross_tenant(self):
+        same_account_response = self.client.post("/api/v1/accounting/accounts/transfer/", {
+            "from_account": str(self.account.id),
+            "to_account": str(self.account.id),
+            "amount": "100.00",
+        }, format="json")
+        self.assertEqual(same_account_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        second_account = BankAccount.objects.create(
+            business=self.business,
+            account_name="Secondary Bank",
+            account_number="BANK-4",
+            ifsc_code="BANK0004",
+            bank_name="Secondary Bank",
+        )
+        zero_amount_response = self.client.post("/api/v1/accounting/accounts/transfer/", {
+            "from_account": str(self.account.id),
+            "to_account": str(second_account.id),
+            "amount": "0.00",
+        }, format="json")
+        self.assertEqual(zero_amount_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        cross_tenant_response = self.client.post("/api/v1/accounting/accounts/transfer/", {
+            "from_account": str(self.account.id),
+            "to_account": str(self.other_account.id),
+            "amount": "100.00",
+        }, format="json")
+        self.assertEqual(cross_tenant_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.account.refresh_from_db()
+        self.other_account.refresh_from_db()
+        self.assertEqual(self.account.current_balance, Decimal("1000.00"))
+        self.assertEqual(self.other_account.current_balance, Decimal("500.00"))
+
 
 class ReportsExportTests(APITestCase):
     def auth_as(self, user):
