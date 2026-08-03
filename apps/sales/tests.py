@@ -482,6 +482,27 @@ class SalesInvoiceLifecycleTests(APITestCase):
         self.assertEqual(str(other_item.current_stock), "5.000")
         self.assertEqual(SalesInvoice.objects.filter(business=self.business).count(), 0)
 
+    def test_pos_sale_rejects_quantity_beyond_available_stock(self):
+        # self.item has current_stock=10; selling 999 must be rejected
+        # atomically with no stock, invoice, or payment side-effects. This
+        # is the server-side backstop behind the POS "Change QTY" [Q]
+        # shortcut, which has no upper bound of its own on the client.
+        payload = self._invoice_payload(is_pos=True, paid_amount="209895.00", total_amount="209895.00")
+        payload["line_items"][0]["quantity"] = "999.000"
+        payload["line_items"][0]["taxable_amount"] = "999000.00"
+        payload["line_items"][0]["tax_amount"] = "49950.00"
+        payload["line_items"][0]["amount"] = "1048950.00"
+
+        response = self.client.post("/api/v1/sales/invoices/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        stock = ItemGodownStock.objects.get(business=self.business, item=self.item, godown=self.godown)
+        self.assertEqual(str(self.item.current_stock), "10.000")
+        self.assertEqual(str(stock.current_stock), "10.000")
+        self.assertEqual(SalesInvoice.objects.filter(business=self.business).count(), 0)
+        self.assertEqual(PaymentIn.objects.filter(business=self.business).count(), 0)
+
     def test_invoice_and_initial_payment_numbers_continue_from_existing_documents(self):
         fy = self._current_fy()
         SalesInvoice.objects.create(
