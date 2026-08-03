@@ -280,6 +280,35 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "business", "order_number", "converted_invoice", "created_at"]
 
+    def validate(self, attrs):
+        business = self.context["request"].business
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        total_amount = Decimal(str(attrs.get("total_amount", getattr(self.instance, "total_amount", 0)) or 0))
+        line_items = attrs.get("line_items")
+
+        if not party:
+            raise serializers.ValidationError({"party": "Select a supplier before saving the purchase order."})
+        if party.business_id != business.id:
+            raise serializers.ValidationError({"party": "Choose a supplier from the active tenant."})
+        if party.party_type not in ["supplier", "both"]:
+            raise serializers.ValidationError({"party": "Purchase orders can only be linked to supplier parties."})
+        if total_amount <= 0:
+            raise serializers.ValidationError({"total_amount": "Order total must be greater than zero."})
+
+        if line_items is not None:
+            if not line_items:
+                raise serializers.ValidationError({"line_items": "Add at least one item before saving this order."})
+            for index, line_item in enumerate(line_items, start=1):
+                item = line_item.get("item")
+                if item and item.business_id != business.id:
+                    raise serializers.ValidationError(f"Line {index}: select an active item from this business.")
+                if Decimal(str(line_item.get("quantity") or 0)) <= 0:
+                    raise serializers.ValidationError(f"Line {index}: quantity must be greater than zero.")
+                if Decimal(str(line_item.get("rate") or 0)) < 0:
+                    raise serializers.ValidationError(f"Line {index}: rate cannot be negative.")
+
+        return attrs
+
     def create(self, validated_data):
         business = self.context["request"].business
         line_items_data = validated_data.pop("line_items")

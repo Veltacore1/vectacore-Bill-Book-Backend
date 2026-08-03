@@ -262,6 +262,82 @@ class PurchaseLifecycleAuditTests(APITestCase):
             ).exists()
         )
 
+    def test_purchase_order_convert_to_invoice_computes_gst_from_line_items(self):
+        # self.item is 0% GST, which can never catch a broken tax
+        # calculation (0 x anything is still 0). Use a real GST rate here
+        # so a regression is actually detectable.
+        taxed_item = Item.objects.create(
+            business=self.business,
+            name="Taxed Silk Saree",
+            item_code="PO-CNV-SILK-002",
+            hsn_code="50072010",
+            selling_price=1000,
+            purchase_price=1000,
+            gst_rate=5,
+            current_stock=0,
+            godown=self.godown,
+        )
+        order_response = self.client.post("/api/v1/purchases/orders/", {
+            "party": str(self.supplier.id),
+            "total_amount": "1050.00",
+            "line_items": [{
+                "item": str(taxed_item.id),
+                "item_name": taxed_item.name,
+                "quantity": "1.000",
+                "rate": "1000.00",
+                "gst_rate": "5.00",
+                "amount": "1050.00",
+                "sort_order": 0,
+            }],
+        }, format="json")
+        self.assertEqual(order_response.status_code, status.HTTP_201_CREATED)
+
+        convert_response = self.client.post(
+            f"/api/v1/purchases/orders/{order_response.data['id']}/convert_to_invoice/",
+            {},
+            format="json",
+        )
+        self.assertEqual(convert_response.status_code, status.HTTP_200_OK)
+        invoice = convert_response.data["invoice"]
+        self.assertEqual(invoice["taxable_amount"], "1000.00")
+        cgst = Decimal(invoice["cgst_amount"])
+        sgst = Decimal(invoice["sgst_amount"])
+        self.assertEqual(cgst + sgst, Decimal("50.00"))
+        self.assertEqual(invoice["total_amount"], "1050.00")
+
+    def test_purchase_order_rejects_missing_party_zero_total_and_bad_line_items(self):
+        no_party_response = self.client.post("/api/v1/purchases/orders/", {
+            "total_amount": "1800.00",
+            "line_items": [self._line_item()],
+        }, format="json")
+        self.assertEqual(no_party_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        zero_total_response = self.client.post("/api/v1/purchases/orders/", {
+            "party": str(self.supplier.id),
+            "total_amount": "0.00",
+            "line_items": [self._line_item()],
+        }, format="json")
+        self.assertEqual(zero_total_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        zero_qty_line = self._line_item(quantity="0.000")
+        zero_qty_response = self.client.post("/api/v1/purchases/orders/", {
+            "party": str(self.supplier.id),
+            "total_amount": "1800.00",
+            "line_items": [zero_qty_line],
+        }, format="json")
+        self.assertEqual(zero_qty_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        negative_rate_line = self._line_item()
+        negative_rate_line["rate"] = "-900.00"
+        negative_rate_response = self.client.post("/api/v1/purchases/orders/", {
+            "party": str(self.supplier.id),
+            "total_amount": "1800.00",
+            "line_items": [negative_rate_line],
+        }, format="json")
+        self.assertEqual(negative_rate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertFalse(PurchaseOrder.objects.filter(business=self.business).exists())
+
     def test_purchase_return_is_real_voucher_with_stock_cancel_and_workspace_row(self):
         create_response = self.client.post("/api/v1/purchases/returns/", {
             "party": str(self.supplier.id),

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -176,25 +177,44 @@ class PurchaseOrderViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
             return Response({"success": False, "message": "Cancelled purchase orders cannot be converted"}, status=status.HTTP_400_BAD_REQUEST)
             
         with transaction.atomic():
-            invoice_data = {
-                "party": order.party.id,
-                "subtotal": float(order.total_amount),
-                "total_amount": float(order.total_amount),
-                "notes": f"Converted from Purchase Order No: {order.order_number}",
-                "line_items": []
-            }
-            
+            line_payloads = []
+            total_taxable = Decimal("0")
+            total_tax = Decimal("0")
             for line_item in order.line_items.all():
-                invoice_data["line_items"].append({
+                quantity = Decimal(str(line_item.quantity))
+                rate = Decimal(str(line_item.rate))
+                gst_rate = Decimal(str(line_item.gst_rate or 0))
+                taxable = (quantity * rate).quantize(Decimal("0.01"))
+                tax = (taxable * gst_rate / Decimal("100")).quantize(Decimal("0.01"))
+                total_taxable += taxable
+                total_tax += tax
+                line_payloads.append({
                     "item": line_item.item.id if line_item.item else None,
                     "item_name": line_item.item_name,
-                    "quantity": float(line_item.quantity),
-                    "rate": float(line_item.rate),
-                    "gst_rate": float(line_item.gst_rate),
-                    "taxable_amount": float(line_item.amount),
-                    "amount": float(line_item.amount)
+                    "quantity": float(quantity),
+                    "rate": float(rate),
+                    "gst_rate": float(gst_rate),
+                    "taxable_amount": float(taxable),
+                    "amount": float(taxable + tax)
                 })
-                
+
+            # Round CGST then derive SGST by subtraction so the two always
+            # sum to exactly total_tax (see the identical fix in api/sales.ts
+            # and apps/sales/views.py's register-to-invoice conversion).
+            cgst_amount = (total_tax / 2).quantize(Decimal("0.01"))
+            sgst_amount = total_tax - cgst_amount
+
+            invoice_data = {
+                "party": order.party.id,
+                "subtotal": float(total_taxable),
+                "taxable_amount": float(total_taxable),
+                "cgst_amount": float(cgst_amount),
+                "sgst_amount": float(sgst_amount),
+                "total_amount": float(total_taxable + total_tax),
+                "notes": f"Converted from Purchase Order No: {order.order_number}",
+                "line_items": line_payloads
+            }
+
             serializer = PurchaseInvoiceSerializer(data=invoice_data, context={"request": request})
             serializer.is_valid(raise_exception=True)
             invoice = serializer.save()
