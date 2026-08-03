@@ -9,7 +9,7 @@ from apps.accounts.models import ActivityLog, Business, User
 from apps.items.models import Godown, Item, ItemGodownStock
 from apps.parties.models import Party
 from apps.payments.models import PaymentOut
-from apps.purchases.models import PurchaseInvoice, PurchaseOrder, PurchaseReturn
+from apps.purchases.models import DebitNote, PurchaseInvoice, PurchaseOrder, PurchaseReturn
 
 
 class PurchaseLifecycleAuditTests(APITestCase):
@@ -337,6 +337,35 @@ class PurchaseLifecycleAuditTests(APITestCase):
         self.assertEqual(negative_rate_response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.assertFalse(PurchaseOrder.objects.filter(business=self.business).exists())
+
+    def test_debit_note_rejects_zero_total_and_non_supplier_party(self):
+        zero_total_response = self.client.post("/api/v1/purchases/debit-notes/", {
+            "party": str(self.supplier.id),
+            "total_amount": "0.00",
+            "reason": "Rate difference",
+        }, format="json")
+        self.assertEqual(zero_total_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        negative_total_response = self.client.post("/api/v1/purchases/debit-notes/", {
+            "party": str(self.supplier.id),
+            "total_amount": "-100.00",
+            "reason": "Rate difference",
+        }, format="json")
+        self.assertEqual(negative_total_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        customer = Party.objects.create(
+            business=self.business,
+            name="Retail Customer",
+            party_type="customer",
+        )
+        wrong_party_type_response = self.client.post("/api/v1/purchases/debit-notes/", {
+            "party": str(customer.id),
+            "total_amount": "250.00",
+            "reason": "Rate difference",
+        }, format="json")
+        self.assertEqual(wrong_party_type_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertFalse(DebitNote.objects.filter(business=self.business).exists())
 
     def test_purchase_return_is_real_voucher_with_stock_cancel_and_workspace_row(self):
         create_response = self.client.post("/api/v1/purchases/returns/", {

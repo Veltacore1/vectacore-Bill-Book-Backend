@@ -511,6 +511,29 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "business", "debit_note_number", "created_at"]
 
+    def validate(self, attrs):
+        business = self.context["request"].business
+        party = attrs.get("party") or getattr(self.instance, "party", None)
+        original_invoice = attrs.get("original_invoice") or getattr(self.instance, "original_invoice", None)
+        total_amount = Decimal(str(attrs.get("total_amount", getattr(self.instance, "total_amount", 0)) or 0))
+
+        if party:
+            if party.business_id != business.id or not party.is_active:
+                raise serializers.ValidationError({"party": "Choose an active supplier from the active tenant."})
+            if party.party_type not in ["supplier", "both"]:
+                raise serializers.ValidationError({"party": "Debit notes can only be linked to supplier parties."})
+
+        if original_invoice:
+            if original_invoice.business_id != business.id:
+                raise serializers.ValidationError({"original_invoice": "Choose a purchase invoice from the active tenant."})
+            if party and original_invoice.party_id != party.id:
+                raise serializers.ValidationError({"original_invoice": "The linked purchase invoice must belong to the selected supplier."})
+
+        if total_amount <= 0:
+            raise serializers.ValidationError({"total_amount": "Debit note total must be greater than zero."})
+
+        return attrs
+
     def create(self, validated_data):
         business = self.context["request"].business
         
