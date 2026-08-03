@@ -238,6 +238,30 @@ class SMSProviderBoundaryTests(APITestCase):
             1,
         )
 
+    def test_campaign_creation_dedupes_parties_sharing_a_mobile_number(self):
+        # Two distinct party records with the same mobile number is a real
+        # scenario (data entry duplicates, shared family phone), but
+        # SMSRecipient has a unique (campaign, mobile) constraint — creating
+        # a campaign against both used to crash with an IntegrityError.
+        Party.objects.create(
+            business=self.business,
+            name="Duplicate Mobile Customer",
+            party_type="customer",
+            mobile=self.party.mobile,
+        )
+
+        response = self.client.post("/api/v1/business-tools/sms-campaigns/", {
+            "name": "Shared Mobile Campaign",
+            "audience": "all_customers",
+            "message": "Silk saree festival offer",
+            "send_now": False,
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        campaign = SMSCampaign.objects.get()
+        self.assertEqual(campaign.recipient_count, 1)
+        self.assertEqual(SMSRecipient.objects.filter(campaign=campaign).count(), 1)
+
     @override_settings(
         SMS_PROVIDER="sms_gateway",
         SMS_PROVIDER_API_URL="https://sms.example.test/send",

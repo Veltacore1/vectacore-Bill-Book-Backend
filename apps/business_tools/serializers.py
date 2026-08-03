@@ -214,7 +214,18 @@ class SMSCampaignSerializer(serializers.ModelSerializer):
         if audience == "manual":
             queryset = queryset.filter(id__in=party_ids)
 
-        return list(queryset)
+        # SMSRecipient has a unique (campaign, mobile) constraint, but two
+        # different party records can share the same mobile number (data
+        # entry duplicates, family members, etc.) — keep only the first
+        # party per mobile so bulk_create doesn't hit an IntegrityError.
+        seen_mobiles = set()
+        deduped = []
+        for party in queryset:
+            if party.mobile in seen_mobiles:
+                continue
+            seen_mobiles.add(party.mobile)
+            deduped.append(party)
+        return deduped
 
     def create(self, validated_data):
         request = self.context["request"]
