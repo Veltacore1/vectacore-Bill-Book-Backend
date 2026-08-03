@@ -426,6 +426,49 @@ class ReportsExportTests(APITestCase):
         self.assertEqual(item_profit["rows"][0][0], "BASIC-GFC6-9ATM00")
         self.assertIn("\u20b9 250.00", item_profit["rows"][0])
 
+    def test_tax_summary_net_gst_header_matches_its_own_rows(self):
+        # Invoice header cgst/sgst is rounded once from the invoice total,
+        # while this report's rows sum each line's own already-rounded
+        # tax_amount - on a header that (realistically) drifts a paisa or
+        # two from the sum of its lines, the report's headline metric must
+        # still match the sum of the rows it actually displays, not the
+        # separate header-based aggregate.
+        self.auth_as(self.user)
+        drifted_invoice = SalesInvoice.objects.create(
+            business=self.business,
+            invoice_number="INV/26-27/0002",
+            party=self.customer,
+            subtotal=Decimal("1000.00"),
+            taxable_amount=Decimal("1000.00"),
+            cgst_amount=Decimal("25.03"),
+            sgst_amount=Decimal("25.03"),
+            total_amount=Decimal("1050.06"),
+            paid_amount=Decimal("0.00"),
+            status="unpaid",
+            created_by=self.user,
+        )
+        SalesInvoiceItem.objects.create(
+            invoice=drifted_invoice,
+            item=self.item,
+            item_name=self.item.name,
+            item_code=self.item.item_code,
+            hsn_code=self.item.hsn_code,
+            quantity=Decimal("1.000"),
+            rate=Decimal("1000.00"),
+            gst_rate=Decimal("5.00"),
+            taxable_amount=Decimal("1000.00"),
+            tax_amount=Decimal("50.00"),
+            amount=Decimal("1050.00"),
+        )
+
+        response = self.client.get("/api/v1/accounting/reports/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tax_summary = next(report for report in response.data["reports"] if report["id"] == "tax-summary")
+        row_net_total = sum(Decimal(row[-1].replace("₹", "").replace(",", "").strip()) for row in tax_summary["rows"])
+        header_net = Decimal(tax_summary["metricValue"].replace("₹", "").replace(",", "").strip())
+        self.assertEqual(header_net, row_net_total)
+
     def test_reports_do_not_crash_when_a_purchased_item_has_no_hsn_code(self):
         no_hsn_item = Item.objects.create(
             business=self.business,

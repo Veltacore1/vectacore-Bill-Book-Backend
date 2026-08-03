@@ -1028,7 +1028,18 @@ class ReportsView(APIView):
                 "GST",
                 "Rate-wise output tax, input tax, and net liability.",
                 "Net GST",
-                _inr(output_gst - input_gst, 2),
+                # Sum the same rate-wise rows this report actually displays,
+                # not the separate invoice-header output_gst/input_gst
+                # aggregates - those are rounded once per invoice total,
+                # while these rows sum each line's own already-rounded
+                # tax_amount, so the two totals can drift a paisa or two
+                # apart on multi-line invoices. Keep this report's own
+                # header self-consistent with its own rows.
+                _inr(
+                    sum((v["sales_tax"] for v in tax_summary.values()), Decimal("0"))
+                    - sum((v["purchase_tax"] for v in tax_summary.values()), Decimal("0")),
+                    2,
+                ),
                 ["GST Rate", "Sales Taxable", "Output Tax", "Purchase Taxable", "Input Tax", "Net"],
                 [
                     [f"{rate}%", _inr(values["sales_taxable"], 2), _inr(values["sales_tax"], 2), _inr(values["purchase_taxable"], 2), _inr(values["purchase_tax"], 2), _inr(values["sales_tax"] - values["purchase_tax"], 2)]
