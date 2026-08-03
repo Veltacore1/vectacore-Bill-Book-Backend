@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework import status, views, viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -409,7 +410,19 @@ class CookieTokenRefreshView(TokenRefreshView):
                 payload["refresh"] = cookie_refresh
 
         serializer = self.get_serializer(data=payload)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError:
+            # Instantiating the refresh token inside the serializer's
+            # validate() raises this directly (expired or blacklisted
+            # token) - it isn't a DRF exception, so it would otherwise
+            # propagate past is_valid() as an unhandled 500 instead of a
+            # normal "please log in again" response.
+            response = Response(
+                {"detail": "Refresh token is invalid, expired, or blacklisted."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            return _clear_refresh_cookie(response)
         response_payload = dict(serializer.validated_data)
         refresh_token = serializer.validated_data.get("refresh") or payload.get("refresh")
         response_payload.pop("refresh", None)

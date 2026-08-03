@@ -364,6 +364,24 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
         self.assertEqual(workspace_response.data["business"]["name"], "Refresh Tenant")
 
+    def test_refresh_token_endpoint_rejects_blacklisted_token_without_crashing(self):
+        # A blacklisted/expired refresh token raises TokenError directly out
+        # of TokenRefreshSerializer.validate() - it isn't a DRF exception,
+        # so without an explicit catch it propagates past is_valid() as an
+        # unhandled 500 instead of a normal 401. Reproduces a real browser
+        # scenario: a stale tab or duplicate refresh race reusing a token
+        # that's since been rotated out.
+        business = Business.objects.create(name="Blacklist Refresh Tenant", phone="9000000097")
+        user = self.make_user(business, "9000000096", "admin", "Blacklist Refresh Admin")
+        refresh = RefreshToken.for_user(user)
+        refresh.blacklist()
+
+        response = self.client.post("/api/v1/auth/token/refresh", {
+            "refresh": str(refresh),
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
     def test_refresh_token_endpoint_accepts_httponly_cookie_session(self):
         business = Business.objects.create(name="Cookie Refresh Tenant", phone="9000000198")
         user = self.make_user(business, "9000000199", "admin", "Cookie Refresh Admin")
