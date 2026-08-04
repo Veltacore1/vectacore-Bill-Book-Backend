@@ -117,6 +117,66 @@ class PurchaseLifecycleAuditTests(APITestCase):
             ).exists()
         )
 
+    def test_purchase_invoice_print_pdf_shows_every_line_item_and_gst_breakdown(self):
+        # buildPurchaseVoucherHtml (the old client-side print path) only ever
+        # rendered row.itemName - the first line item - and had no CGST/SGST
+        # breakdown at all. This exercises the new server-rendered
+        # print_pdf endpoint against a two-line, GST-rated invoice to prove
+        # every line item and the full tax breakdown actually appear.
+        second_item = Item.objects.create(
+            business=self.business,
+            name="Zari Border Saree",
+            item_code="PUR-SILK-002",
+            selling_price=2500,
+            purchase_price=1500,
+            gst_rate=5,
+            current_stock=Decimal("5.000"),
+            godown=self.godown,
+        )
+        line_items = [
+            {
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "2.000",
+                "rate": "900.00",
+                "gst_rate": "5.00",
+                "taxable_amount": "1800.00",
+                "amount": "1890.00",
+                "sort_order": 0,
+            },
+            {
+                "item": str(second_item.id),
+                "item_name": second_item.name,
+                "quantity": "1.000",
+                "rate": "1500.00",
+                "gst_rate": "5.00",
+                "taxable_amount": "1500.00",
+                "amount": "1575.00",
+                "sort_order": 1,
+            },
+        ]
+        create_response = self.client.post("/api/v1/purchases/invoices/", {
+            "party": str(self.supplier.id),
+            "subtotal": "3300.00",
+            "taxable_amount": "3300.00",
+            "cgst_amount": "82.50",
+            "sgst_amount": "82.50",
+            "total_amount": "3465.00",
+            "paid_amount": "0.00",
+            "line_items": line_items,
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        invoice_id = create_response.data["id"]
+
+        print_response = self.client.get(f"/api/v1/purchases/invoices/{invoice_id}/print_pdf/?template=a4")
+
+        self.assertEqual(print_response.status_code, status.HTTP_200_OK)
+        html = print_response.content.decode()
+        self.assertIn(self.item.name, html)
+        self.assertIn(second_item.name, html)
+        self.assertIn("Rs. 82.50", html)  # CGST
+        self.assertIn("Rs. 3,465.00", html)  # total
+
     def test_purchase_invoice_rejects_zero_quantity_and_negative_rate_line_items(self):
         zero_qty_response = self.client.post("/api/v1/purchases/invoices/", {
             "party": str(self.supplier.id),

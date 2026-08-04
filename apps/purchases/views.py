@@ -1,8 +1,10 @@
 from decimal import Decimal
+from html import escape
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
+from django.http import HttpResponse
 from django.utils import timezone
 from .models import PurchaseInvoice, PurchaseOrder, PurchaseReturn, DebitNote
 from .serializers import (
@@ -12,6 +14,7 @@ from .serializers import (
 from apps.accounts.activity import write_activity
 from apps.items.models import Item, apply_stock_movement
 from apps.payments.models import PaymentOutSettlement
+from apps.sales.views import _money, _date, _business_address, _bank_lines, _invoice_print_settings
 
 
 def _write_purchase_activity(request, action, entity_type, entity_id, details):
@@ -34,6 +37,198 @@ def _voucher_details(voucher, number_attr, **extra):
     }
     details.update(extra)
     return details
+
+
+def _render_purchase_invoice_print_html(invoice, template="a4"):
+    business = invoice.business
+    party = invoice.party
+    _, business_preferences = _invoice_print_settings(business)
+    lines = list(invoice.line_items.all().order_by("sort_order"))
+    balance = invoice.total_amount - invoice.paid_amount
+    template = "thermal" if template == "thermal" else "a4"
+    bank_lines = _bank_lines(business.bank_account_details)
+    terms = business.terms_conditions or "Thank you for your business."
+    bank_html = "".join(f"<p><strong>{escape(label)}:</strong> {escape(value)}</p>" for label, value in bank_lines)
+
+    rows = []
+    for index, line in enumerate(lines, start=1):
+        rows.append(f"""
+          <tr>
+            <td class="right">{index}</td>
+            <td class="left"><strong>{escape(line.item_name)}</strong></td>
+            <td class="right">{line.quantity:g}</td>
+            <td class="right">{_money(line.rate)}</td>
+            <td class="right">{line.discount_pct:g}%</td>
+            <td class="right">{_money(line.taxable_amount)}</td>
+            <td class="right">{line.gst_rate:g}%</td>
+            <td class="right">{_money(line.amount)}</td>
+          </tr>
+        """)
+
+    thermal_rows = []
+    for line in lines:
+        thermal_rows.append(f"""
+          <div class="thermal-line">
+            <span>{escape(line.item_name)}</span>
+            <b>{line.quantity:g} x {_money(line.rate)}</b>
+            <strong>{_money(line.amount)}</strong>
+          </div>
+        """)
+
+    if template == "thermal":
+        body = f"""
+          <main class="thermal-receipt">
+            <header>
+              <h1>{escape(business.name or "Business")}</h1>
+              <p>{escape(_business_address(business) or business.phone or "")}</p>
+              <strong>PURCHASE VOUCHER</strong>
+            </header>
+            <section class="thermal-meta">
+              <span>Invoice</span><b>{escape(invoice.invoice_number)}</b>
+              <span>Date</span><b>{_date(invoice.invoice_date)}</b>
+              <span>Supplier</span><b>{escape(party.name)}</b>
+            </section>
+            <section class="thermal-items">
+              {''.join(thermal_rows)}
+            </section>
+            <section class="thermal-totals">
+              <span>Subtotal</span><b>{_money(invoice.subtotal)}</b>
+              {'<span>Discount</span><b>- ' + _money(invoice.discount_amount) + '</b>' if invoice.discount_amount else ''}
+              <span>CGST</span><b>{_money(invoice.cgst_amount)}</b>
+              <span>SGST</span><b>{_money(invoice.sgst_amount)}</b>
+              {'<span>IGST</span><b>' + _money(invoice.igst_amount) + '</b>' if invoice.igst_amount else ''}
+              <span>Total</span><strong>{_money(invoice.total_amount)}</strong>
+              <span>Paid</span><b>{_money(invoice.paid_amount)}</b>
+              <span>Balance</span><strong>{_money(balance)}</strong>
+            </section>
+            <footer>{escape(terms)}</footer>
+          </main>
+        """
+    else:
+        body = f"""
+          <main class="a4-sheet">
+            <header class="invoice-head">
+              <div>
+                <strong>PURCHASE VOUCHER</strong>
+                <span>{escape(invoice.get_status_display())}</span>
+              </div>
+              <b>{escape(business.name or "Business")}</b>
+            </header>
+            <section class="invoice-grid">
+              <div class="business-block">
+                <h1>{escape(business.name or "Business")}</h1>
+                <p>{escape(_business_address(business) or "-")}</p>
+                <p><strong>GSTIN:</strong> {escape(business.gstin or "-")}</p>
+                <p><strong>Mobile:</strong> {escape(business.phone or "-")}</p>
+                {bank_html}
+              </div>
+              <div class="meta-block">
+                <p><strong>Purchase Invoice No.</strong><span>{escape(invoice.invoice_number)}</span></p>
+                <p><strong>Invoice Date</strong><span>{_date(invoice.invoice_date)}</span></p>
+                {'<p><strong>Supplier Invoice No.</strong><span>' + escape(invoice.supplier_invoice_number) + '</span></p>' if invoice.supplier_invoice_number else ''}
+              </div>
+              <div class="party-block">
+                <strong>SUPPLIER</strong>
+                <b>{escape(party.name)}</b>
+                {'<span>GSTIN: ' + escape(party.gstin) + '</span>' if getattr(party, "gstin", None) else ''}
+              </div>
+            </section>
+            <table class="line-table">
+              <thead>
+                <tr>
+                  <th>S.NO.</th><th>ITEMS</th><th>QTY</th><th>RATE</th><th>DISC.</th><th>TAXABLE</th><th>GST</th><th>AMOUNT</th>
+                </tr>
+              </thead>
+              <tbody>
+                {''.join(rows)}
+              </tbody>
+            </table>
+            <section class="totals-grid">
+              <div>
+                <strong>Notes</strong>
+                <span>{escape(invoice.notes or "-")}</span>
+              </div>
+              <table>
+                <tbody>
+                  <tr><td>Subtotal</td><td>{_money(invoice.subtotal)}</td></tr>
+                  <tr><td>Discount</td><td>- {_money(invoice.discount_amount)}</td></tr>
+                  <tr><td>CGST</td><td>{_money(invoice.cgst_amount)}</td></tr>
+                  <tr><td>SGST</td><td>{_money(invoice.sgst_amount)}</td></tr>
+                  <tr><td>IGST</td><td>{_money(invoice.igst_amount)}</td></tr>
+                  <tr class="grand"><td>Total</td><td>{_money(invoice.total_amount)}</td></tr>
+                  <tr><td>Paid</td><td>{_money(invoice.paid_amount)}</td></tr>
+                  <tr class="balance"><td>Balance</td><td>{_money(balance)}</td></tr>
+                </tbody>
+              </table>
+            </section>
+          </main>
+        """
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{escape(invoice.invoice_number)} Purchase Voucher</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: #eef1f5; color: #111827; font-family: Arial, Helvetica, sans-serif; }}
+    .toolbar {{ position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-bottom: 1px solid #d6dce7; background: #fff; }}
+    .toolbar div {{ display: flex; align-items: center; gap: 8px; }}
+    .toolbar strong {{ font-size: 15px; }}
+    .toolbar button {{ height: 36px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #1f2937; padding: 0 12px; font-weight: 700; cursor: pointer; }}
+    .toolbar button.primary {{ border-color: #5b44d8; background: #5b44d8; color: #fff; }}
+    .a4-sheet {{ width: 210mm; min-height: 297mm; margin: 18px auto; padding: 12mm; background: #fff; box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18); font-size: 12px; }}
+    .invoice-head {{ display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; }}
+    .invoice-head div {{ display: flex; align-items: center; gap: 8px; }}
+    .invoice-head strong {{ font-size: 18px; }}
+    .invoice-head span {{ border: 1px solid #8c95aa; color: #566174; padding: 4px 7px; font-weight: 800; }}
+    .invoice-grid {{ display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #111; }}
+    .invoice-grid > div {{ min-height: 34mm; border-right: 1px solid #111; border-bottom: 1px solid #111; padding: 8px; }}
+    .invoice-grid > div:nth-child(2n) {{ border-right: 0; }}
+    h1 {{ margin: 0 0 6px; color: #5B48F5; font-size: 20px; }}
+    p {{ margin: 3px 0; line-height: 1.4; }}
+    .meta-block {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; text-align: center; align-content: center; }}
+    .meta-block p {{ display: grid; gap: 6px; }}
+    .party-block {{ display: grid; align-content: start; gap: 6px; }}
+    .line-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+    .line-table th, .line-table td {{ border: 1px solid #111; padding: 6px; text-align: right; vertical-align: top; }}
+    .line-table th {{ background: color-mix(in srgb, #5B48F5 14%, white); font-weight: 800; }}
+    .line-table th:nth-child(2), .line-table td:nth-child(2) {{ text-align: left; }}
+    .line-table td.left {{ text-align: left; }}
+    .line-table td.right {{ text-align: right; }}
+    .totals-grid {{ display: grid; grid-template-columns: 1fr 72mm; gap: 12px; margin-top: 10px; }}
+    .totals-grid > div {{ border: 1px solid #111; padding: 8px; display: grid; gap: 7px; align-content: start; }}
+    .totals-grid table {{ width: 100%; border-collapse: collapse; }}
+    .totals-grid td {{ border: 1px solid #111; padding: 7px; }}
+    .totals-grid td:last-child {{ text-align: right; font-weight: 800; }}
+    .grand td {{ background: color-mix(in srgb, #5B48F5 14%, white); font-size: 14px; }}
+    .balance td {{ color: #d91f2a; }}
+    .thermal-receipt {{ width: 58mm; min-height: 120mm; margin: 18px auto; padding: 4mm; background: #fff; box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18); font-size: 10px; }}
+    .thermal-receipt header {{ text-align: center; border-bottom: 1px dashed #111; padding-bottom: 6px; }}
+    .thermal-receipt h1 {{ color: #111; font-size: 14px; }}
+    .thermal-meta, .thermal-totals {{ display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding: 7px 0; border-bottom: 1px dashed #111; }}
+    .thermal-line {{ display: grid; gap: 3px; padding: 6px 0; border-bottom: 1px dotted #bbb; }}
+    .thermal-line strong, .thermal-totals strong {{ font-size: 12px; text-align: right; }}
+    .thermal-receipt footer {{ text-align: center; padding-top: 8px; }}
+    @page {{ size: {"58mm auto" if template == "thermal" else "A4"}; margin: {"2mm" if template == "thermal" else "8mm"}; }}
+    @media print {{
+      body {{ background: #fff; }}
+      .toolbar {{ display: none; }}
+      .a4-sheet, .thermal-receipt {{ margin: 0; box-shadow: none; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <strong>{escape(invoice.invoice_number)} - {"Thermal" if template == "thermal" else "A4"} preview</strong>
+    <div>
+      <button onclick="window.close()">Close</button>
+      <button class="primary" onclick="window.print()">Print</button>
+    </div>
+  </div>
+  {body}
+</body>
+</html>"""
 
 
 class LifecycleDeleteBlockedMixin:
@@ -139,6 +334,13 @@ class PurchaseInvoiceViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet)
             "success": True,
             "message": "Purchase invoice cancelled and inventory stock adjusted successfully"
         })
+
+    @action(detail=True, methods=["get"])
+    def print_pdf(self, request, pk=None):
+        """Returns a print-ready purchase voucher HTML template for browser PDF or thermal print."""
+        invoice = self.get_object()
+        template = request.query_params.get("template") or request.query_params.get("format") or "a4"
+        return HttpResponse(_render_purchase_invoice_print_html(invoice, template), content_type="text/html")
 
 class PurchaseOrderViewSet(LifecycleDeleteBlockedMixin, viewsets.ModelViewSet):
     serializer_class = PurchaseOrderSerializer
