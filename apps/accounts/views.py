@@ -434,10 +434,16 @@ class LogoutView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        if request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME):
+        cookie_refresh = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE_NAME)
+        if cookie_refresh:
             csrf_failure = _enforce_csrf(request)
             if csrf_failure is not None:
                 return csrf_failure
+            try:
+                RefreshToken(cookie_refresh).blacklist()
+            except TokenError:
+                # Already expired/blacklisted/malformed - nothing left to revoke.
+                pass
         response = Response({"success": True, "message": "Session cleared"})
         return _clear_refresh_cookie(response)
 

@@ -435,6 +435,24 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertEqual(response.cookies["vastrabook_refresh"].value, "")
         self.assertEqual(response.cookies["vastrabook_refresh"]["path"], "/api/v1/auth")
 
+    def test_logout_blacklists_the_refresh_token_not_just_the_cookie(self):
+        # Clearing the cookie alone leaves the token itself valid forever -
+        # anything holding a copy (a stale in-flight refresh request, a
+        # leaked token) could keep minting new sessions after "logout".
+        business = Business.objects.create(name="Logout Blacklist Tenant", phone="9000000801")
+        user = self.make_user(business, "9000000802", "admin", "Logout Blacklist Admin")
+        refresh = RefreshToken.for_user(user)
+        self.client.cookies["vastrabook_refresh"] = str(refresh)
+
+        logout_response = self.client.post("/api/v1/auth/logout", {}, format="json")
+        self.assertEqual(logout_response.status_code, status.HTTP_200_OK)
+
+        replay_client = APIClient()
+        replay_client.cookies["vastrabook_refresh"] = str(refresh)
+        refresh_response = replay_client.post("/api/v1/auth/token/refresh", {}, format="json")
+
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
     def test_cookie_logout_requires_csrf_header_when_csrf_checks_are_enforced(self):
         client = APIClient(enforce_csrf_checks=True)
         client.cookies["vastrabook_refresh"] = "stale-refresh-token"
