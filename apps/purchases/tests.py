@@ -491,6 +491,66 @@ class PurchaseLifecycleAuditTests(APITestCase):
             ).exists()
         )
 
+    def test_purchase_return_print_pdf_shows_every_line_item_and_tax_total(self):
+        # Same bug class as purchase invoices: the old client-side print path
+        # only ever showed the first line item and no tax breakdown at all.
+        second_item = Item.objects.create(
+            business=self.business,
+            name="Zari Border Saree",
+            item_code="PR-SILK-002",
+            selling_price=2500,
+            purchase_price=1500,
+            gst_rate=5,
+            current_stock=Decimal("5.000"),
+            godown=self.godown,
+        )
+        ItemGodownStock.objects.create(
+            business=self.business,
+            item=second_item,
+            godown=self.godown,
+            opening_stock=Decimal("5.000"),
+            current_stock=Decimal("5.000"),
+        )
+        line_items = [
+            {
+                "item": str(self.item.id),
+                "item_name": self.item.name,
+                "quantity": "1.000",
+                "rate": "900.00",
+                "gst_rate": "5.00",
+                "taxable_amount": "900.00",
+                "amount": "945.00",
+                "sort_order": 0,
+            },
+            {
+                "item": str(second_item.id),
+                "item_name": second_item.name,
+                "quantity": "1.000",
+                "rate": "1500.00",
+                "gst_rate": "5.00",
+                "taxable_amount": "1500.00",
+                "amount": "1575.00",
+                "sort_order": 1,
+            },
+        ]
+        create_response = self.client.post("/api/v1/purchases/returns/", {
+            "party": str(self.supplier.id),
+            "total_amount": "2520.00",
+            "reason": "Colour mismatch",
+            "line_items": line_items,
+        }, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        return_id = create_response.data["id"]
+
+        print_response = self.client.get(f"/api/v1/purchases/returns/{return_id}/print_pdf/?template=a4")
+
+        self.assertEqual(print_response.status_code, status.HTTP_200_OK)
+        html = print_response.content.decode()
+        self.assertIn(self.item.name, html)
+        self.assertIn(second_item.name, html)
+        self.assertIn("Rs. 2,400.00", html)  # taxable value (900 + 1500)
+        self.assertIn("Rs. 2,520.00", html)  # total
+
     def test_purchase_return_rejects_cross_tenant_item_without_stock_change(self):
         other_business = Business.objects.create(name="Other Purchase Return Tenant", phone="9100000801", invoice_prefix="OPR")
         other_item = Item.objects.create(
