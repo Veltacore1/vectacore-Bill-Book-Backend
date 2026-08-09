@@ -598,6 +598,7 @@ class TenantOnboardingPermissionTests(APITestCase):
             "email": "owner@example.com",
             "state": "Tamil Nadu",
             "invoice_prefix": "FTH",
+            "password": "secret12",
         }, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -645,6 +646,40 @@ class TenantOnboardingPermissionTests(APITestCase):
         self.assertIn("vastrabook_refresh", response.cookies)
         self.assertTrue(response.cookies["vastrabook_refresh"]["httponly"])
 
+    def test_password_login_after_registration(self):
+        register_response = self.client.post("/api/v1/auth/register", {
+            "business_name": "Password Textile",
+            "owner_name": "Password Owner",
+            "mobile": "9000000201",
+            "password": "secret12",
+            "invoice_prefix": "PWD",
+        }, format="json")
+
+        self.assertEqual(register_response.status_code, status.HTTP_201_CREATED)
+        self.client.credentials()
+
+        login_response = self.client.post("/api/v1/auth/login", {
+            "mobile": "9000000201",
+            "password": "secret12",
+        }, format="json")
+
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", login_response.data["tokens"])
+        self.assertEqual(login_response.data["user"]["mobile"], "9000000201")
+
+    def test_password_login_rejects_invalid_credentials(self):
+        business = Business.objects.create(name="Login Textile", phone="9000000202")
+        user = self.make_user(business, "9000000202", "admin", "Login Admin")
+        user.set_password("correct-pass")
+        user.save(update_fields=["password"])
+
+        response = self.client.post("/api/v1/auth/login", {
+            "mobile": "9000000202",
+            "password": "wrong-pass",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_registration_normalizes_and_rejects_duplicate_mobile(self):
         business = Business.objects.create(name="Existing Textile", phone="9000000101")
         self.make_user(business, "9000000101", "admin", "Existing")
@@ -653,6 +688,7 @@ class TenantOnboardingPermissionTests(APITestCase):
             "business_name": "Duplicate Textile",
             "owner_name": "Duplicate Owner",
             "mobile": " 90000 00101 ",
+            "password": "secret12",
             "invoice_prefix": "DUP",
         }, format="json")
 
@@ -664,6 +700,7 @@ class TenantOnboardingPermissionTests(APITestCase):
             "business_name": "Invalid Textile",
             "owner_name": "Invalid Owner",
             "mobile": "9000000111",
+            "password": "secret12",
             "gstin": "BADGST",
             "invoice_prefix": "TOO-LONG-PREFIX",
         }, format="json")

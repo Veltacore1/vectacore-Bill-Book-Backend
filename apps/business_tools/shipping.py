@@ -21,10 +21,15 @@ class ShippingDeliveryError(Exception):
     pass
 
 
-def shiprocket_ready():
+LOCAL_SHIPPING_PROVIDERS = {"local_stub", "demo", "stub"}
+
+
+def shipping_ready():
     provider = (getattr(settings, "SHIPPING_PROVIDER", "disabled") or "disabled").strip().lower()
     if provider in {"disabled", ""}:
         return False, "disabled", "Shipping provider is not configured."
+    if provider in LOCAL_SHIPPING_PROVIDERS:
+        return True, provider, ""
     if provider != "shiprocket":
         return False, provider, f"Shipping provider '{provider}' is not supported yet."
     missing = [
@@ -35,6 +40,11 @@ def shiprocket_ready():
     if missing:
         return False, provider, f"{', '.join(missing)} are required for Shiprocket shipping."
     return True, provider, ""
+
+
+def shiprocket_ready():
+    """Backward-compatible alias used by older call sites and tests."""
+    return shipping_ready()
 
 
 def _decode_provider_body(raw_body):
@@ -80,9 +90,20 @@ def _shiprocket_request(method, path, payload=None, token=None):
         raise ShippingDeliveryError("Shiprocket could not be reached.") from exc
 
 
-def authenticate_shiprocket():
-    ready, provider, message = shiprocket_ready()
+def create_shipping_order(order, request_payload=None):
+    ready, provider, message = shipping_ready()
     if not ready:
+        raise ShippingConfigurationError(message or f"Shipping provider {provider} is not ready.")
+    if provider in LOCAL_SHIPPING_PROVIDERS:
+        return create_local_stub_shipment(order, request_payload=request_payload)
+    if provider == "shiprocket":
+        return create_shiprocket_order(order, request_payload=request_payload)
+    raise ShippingConfigurationError(f"Shipping provider '{provider}' is not supported yet.")
+
+
+def authenticate_shiprocket():
+    ready, provider, message = shipping_ready()
+    if not ready or provider != "shiprocket":
         raise ShippingConfigurationError(message or f"Shipping provider {provider} is not ready.")
 
     payload = {
@@ -157,7 +178,7 @@ def _extract_provider_values(payload):
     }
 
 
-def build_shiprocket_order_payload(order):
+def build_shipping_order_payload(order):
     business = order.business
     item = order.item
     party = order.party
@@ -172,11 +193,12 @@ def build_shiprocket_order_payload(order):
     breadth = _as_decimal("SHIPROCKET_DEFAULT_BREADTH_CM", "24")
     height = _as_decimal("SHIPROCKET_DEFAULT_HEIGHT_CM", "5")
     quantity = Decimal(str(order.quantity))
+    pickup_location = (getattr(settings, "SHIPROCKET_PICKUP_LOCATION", "") or "Primary").strip() or "Primary"
 
     return {
         "order_id": order.order_number,
         "order_date": order.order_date.isoformat(),
-        "pickup_location": settings.SHIPROCKET_PICKUP_LOCATION,
+        "pickup_location": pickup_location,
         "billing_customer_name": _required(order.customer_name, "Customer name is required before creating a shipment."),
         "billing_last_name": "",
         "billing_address": address,
@@ -206,6 +228,44 @@ def build_shiprocket_order_payload(order):
         "height": float(height),
         "weight": float(weight),
         "comment": order.notes or "",
+    }
+
+
+def build_shiprocket_order_payload(order):
+    """Backward-compatible alias for shipment validation/payload building."""
+    return build_shipping_order_payload(order)
+
+
+def create_local_stub_shipment(order, request_payload=None):
+    request_payload = request_payload or build_shipping_order_payload(order)
+    stamp = timezone.now().strftime("%Y%m%d%H%M%S")
+    order_token = str(order.id).replace("-", "")[:10].upper()
+    order_id = f"LOCAL-{order.order_number}"
+    shipment_id = f"SHP-{stamp}"
+    awb_code = f"STUB{stamp}{order_token[:6]}"
+    tracking_url = f"https://local.vastrabook.test/track/{awb_code}"
+    label_url = f"https://local.vastrabook.test/labels/{awb_code}.pdf"
+    response_payload = {
+        "provider": "local_stub",
+        "order_id": order_id,
+        "shipment_id": shipment_id,
+        "awb_code": awb_code,
+        "courier_name": "Local Stub Courier",
+        "label_url": label_url,
+        "tracking_url": tracking_url,
+    }
+    return {
+        "request": request_payload,
+        "response": response_payload,
+        "awb_response": {},
+        "extracted": {
+            "order_id": order_id,
+            "shipment_id": shipment_id,
+            "awb_code": awb_code,
+            "courier_name": "Local Stub Courier",
+            "label_url": label_url,
+            "tracking_url": tracking_url,
+        },
     }
 
 
@@ -246,16 +306,9 @@ def _tracking_status(payload, fallback="awb_assigned"):
     return fallback
 
 
-def sync_shiprocket_tracking(order):
-    if not order.shiprocket_awb_code:
-        raise ShippingOrderValidationError("AWB code is required before syncing Shiprocket tracking.")
-
-    token = authenticate_shiprocket()
-    awb_code = quote(order.shiprocket_awb_code)
-    response_payload = _shiprocket_request("GET", f"courier/track/awb/{awb_code}", token=token)
-    status = _tracking_status(response_payload, fallback=order.shipping_status or "awb_assigned")
+def _apply_tracking_status_updates(order, status, tracking_payload):
     updates = {
-        "tracking_payload": response_payload,
+        "tracking_payload": tracking_payload,
         "shipping_status": status,
     }
     if status == "delivered":
@@ -267,3 +320,45 @@ def sync_shiprocket_tracking(order):
     elif status == "failed":
         updates["shipping_status"] = "failed"
     return updates
+
+
+def sync_local_stub_tracking(order):
+    if not order.shiprocket_awb_code:
+        raise ShippingOrderValidationError("AWB code is required before syncing shipping tracking.")
+
+    current = (order.shipping_status or "awb_assigned").strip().lower()
+    progression = {
+        "order_created": "awb_assigned",
+        "awb_assigned": "pickup_scheduled",
+        "pickup_scheduled": "in_transit",
+        "in_transit": "delivered",
+        "delivered": "delivered",
+    }
+    status = progression.get(current, "in_transit")
+    tracking_payload = {
+        "provider": "local_stub",
+        "awb_code": order.shiprocket_awb_code,
+        "status": status,
+        "message": f"Local stub tracking advanced to {status}.",
+    }
+    return _apply_tracking_status_updates(order, status, tracking_payload)
+
+
+def sync_shiprocket_tracking(order):
+    if not order.shiprocket_awb_code:
+        raise ShippingOrderValidationError("AWB code is required before syncing Shiprocket tracking.")
+
+    token = authenticate_shiprocket()
+    awb_code = quote(order.shiprocket_awb_code)
+    response_payload = _shiprocket_request("GET", f"courier/track/awb/{awb_code}", token=token)
+    status = _tracking_status(response_payload, fallback=order.shipping_status or "awb_assigned")
+    return _apply_tracking_status_updates(order, status, response_payload)
+
+
+def sync_shipping_tracking(order):
+    provider = (order.shipping_provider or getattr(settings, "SHIPPING_PROVIDER", "disabled") or "disabled").strip().lower()
+    if provider in LOCAL_SHIPPING_PROVIDERS:
+        return sync_local_stub_tracking(order)
+    if provider == "shiprocket":
+        return sync_shiprocket_tracking(order)
+    raise ShippingConfigurationError(f"Shipping provider '{provider}' is not configured.")

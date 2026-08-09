@@ -46,6 +46,19 @@ class VerifyOTPSerializer(serializers.Serializer):
             raise serializers.ValidationError("Enter the 6 digit OTP.")
         return cleaned
 
+
+class PasswordLoginSerializer(serializers.Serializer):
+    mobile = serializers.CharField(max_length=20)
+    password = serializers.CharField(max_length=128, write_only=True, trim_whitespace=False)
+
+    def validate_mobile(self, value):
+        return normalize_mobile(value)
+
+    def validate_password(self, value):
+        if not value:
+            raise serializers.ValidationError("Password is required.")
+        return value
+
 class AddUserSerializer(serializers.ModelSerializer):
     mobile = serializers.CharField(max_length=20)
 
@@ -86,9 +99,10 @@ class AddUserSerializer(serializers.ModelSerializer):
         # Create user linked to active business
         user = User.objects.create_user(
             mobile=mobile,
+            password=mobile,
             first_name=first_name,
             role=role,
-            business=business
+            business=business,
         )
         return user
 
@@ -104,7 +118,7 @@ class TextileTenantRegistrationSerializer(serializers.Serializer):
     pincode = serializers.CharField(max_length=10, required=False, allow_blank=True)
     address = serializers.CharField(required=False, allow_blank=True)
     invoice_prefix = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    password = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    password = serializers.CharField(required=True, write_only=True, min_length=6, max_length=128)
 
     def validate_business_name(self, value):
         cleaned = value.strip()

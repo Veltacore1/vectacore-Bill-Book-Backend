@@ -23,10 +23,10 @@ from .shipping import (
     ShippingConfigurationError,
     ShippingDeliveryError,
     ShippingOrderValidationError,
-    build_shiprocket_order_payload,
-    create_shiprocket_order,
-    shiprocket_ready,
-    sync_shiprocket_tracking,
+    build_shipping_order_payload,
+    create_shipping_order,
+    shipping_ready,
+    sync_shipping_tracking,
 )
 from apps.items.models import Item, ItemGodownStock, apply_stock_movement
 
@@ -181,12 +181,12 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
                 "order": serializer.data,
             })
         try:
-            request_payload = build_shiprocket_order_payload(order)
+            request_payload = build_shipping_order_payload(order)
         except ShippingOrderValidationError as exc:
             return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except ShippingConfigurationError as exc:
             return Response({"success": False, "message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        ready, provider, message = shiprocket_ready()
+        ready, provider, message = shipping_ready()
         if not ready:
             return Response(
                 {"success": False, "message": message or f"Shipping provider {provider} is not ready."},
@@ -218,7 +218,7 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
             order.save(update_fields=["dispatch_status", "stock_deducted", "updated_at"])
 
         try:
-            shipment = create_shiprocket_order(order, request_payload=request_payload)
+            shipment = create_shipping_order(order, request_payload=request_payload)
         except ShippingOrderValidationError as exc:
             return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except ShippingConfigurationError as exc:
@@ -229,7 +229,7 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
         extracted = shipment["extracted"]
         with transaction.atomic():
             order = OnlineOrder.objects.select_for_update().get(id=order.id, business=request.business)
-            order.shipping_provider = "shiprocket"
+            order.shipping_provider = provider
             order.shipping_status = "awb_assigned" if extracted["awb_code"] else "order_created"
             order.shiprocket_order_id = extracted["order_id"]
             order.shiprocket_shipment_id = extracted["shipment_id"]
@@ -255,7 +255,7 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(order)
         return Response({
             "success": True,
-            "message": "Shiprocket shipment created.",
+            "message": "Shipment created.",
             "order": serializer.data,
         })
 
@@ -267,7 +267,7 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
             business=request.business,
         )
         try:
-            updates = sync_shiprocket_tracking(order)
+            updates = sync_shipping_tracking(order)
         except ShippingOrderValidationError as exc:
             return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except ShippingConfigurationError as exc:
@@ -284,10 +284,9 @@ class OnlineOrderViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(order)
         return Response({
             "success": True,
-            "message": "Shiprocket tracking synced.",
+            "message": "Shipping tracking synced.",
             "order": serializer.data,
         })
-
 
 class SMSTemplateViewSet(viewsets.ModelViewSet):
     serializer_class = SMSTemplateSerializer

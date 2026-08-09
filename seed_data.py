@@ -28,6 +28,7 @@ from apps.sales.models import (
     SalesInvoiceItem,
 )
 from apps.staff.models import Attendance, Payroll, Staff
+from apps.business_tools.sms_bootstrap import ensure_sms_marketing_workspace
 
 
 def money(value):
@@ -106,6 +107,7 @@ def seed_second_tenant():
         },
     )
     create_user("9000000001", business, "Kanchi Admin")
+    ensure_sms_marketing_workspace(business)
 
 
 def seed_inventory(business):
@@ -664,6 +666,8 @@ def seed_staff_and_settings(business, parties):
             "status": "pending",
         },
     )
+
+    ensure_sms_marketing_workspace(business)
 
 
 def seed_database():

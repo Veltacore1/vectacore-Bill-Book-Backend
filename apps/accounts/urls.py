@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
+    PasswordLoginView,
     SendOTPView,
     VerifyOTPView,
     TextileTenantRegistrationView,
@@ -22,6 +23,7 @@ router.register(r"users", UserManagementViewSet, basename="users")
 
 urlpatterns = [
     path("register", TextileTenantRegistrationView.as_view(), name="tenant_register"),
+    path("login", PasswordLoginView.as_view(), name="password_login"),
     path("send-otp", SendOTPView.as_view(), name="send_otp"),
     path("verify-otp", VerifyOTPView.as_view(), name="verify_otp"),
     path("csrf", CsrfTokenView.as_view(), name="csrf_token"),

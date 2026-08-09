@@ -1,6 +1,27 @@
+import re
+
 from rest_framework import serializers
 from .models import PartyCategory, Party
 from django.db.models import Sum
+
+# Indian mobile: optional +91 / 91 / 0 prefix, then exactly 10 digits starting 6-9.
+_MOBILE_RE = re.compile(r"^(?:\+?91|0)?([6-9]\d{9})$")
+
+
+def normalize_party_mobile(value: str | None) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    digits = re.sub(r"[\s\-()]", "", raw)
+    match = _MOBILE_RE.fullmatch(digits)
+    if not match:
+        raise serializers.ValidationError(
+            "Enter a valid 10-digit Indian mobile number."
+        )
+    return match.group(1)
+
 
 class PartyCategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -26,6 +47,9 @@ class PartySerializer(serializers.ModelSerializer):
             "net_balance", "created_at", "updated_at"
         ]
         read_only_fields = ["id", "shared_ledger_token", "created_at", "updated_at"]
+
+    def validate_mobile(self, value):
+        return normalize_party_mobile(value)
 
     def validate_category(self, value):
         if value and value.business_id != self.context["request"].business.id:

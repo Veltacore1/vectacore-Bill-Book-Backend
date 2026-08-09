@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 from django.conf import settings
+from django.contrib.auth import authenticate
 from django.db import connection, transaction
 from django.db.models import Sum
 from django.middleware.csrf import CsrfViewMiddleware, get_token
@@ -16,8 +17,8 @@ from .models import Business, User, OTPToken, ActivityLog
 from .otp import OTP_TTL_MINUTES, dispatch_login_otp, generate_login_otp, otp_digest, otp_matches
 from .permissions import RoleModulePermission, role_permissions_for
 from .serializers import (
-    BusinessSerializer, UserSerializer, SendOTPSerializer, 
-    VerifyOTPSerializer, AddUserSerializer, ActivityLogSerializer,
+    BusinessSerializer, UserSerializer, SendOTPSerializer,
+    VerifyOTPSerializer, PasswordLoginSerializer, AddUserSerializer, ActivityLogSerializer,
     TextileTenantRegistrationSerializer
 )
 from .throttles import TenantScopedRateThrottle
@@ -106,6 +107,7 @@ def _external_provider_payload():
                 ("SHIPROCKET_PASSWORD", settings.SHIPROCKET_PASSWORD),
                 ("SHIPROCKET_PICKUP_LOCATION", settings.SHIPROCKET_PICKUP_LOCATION),
             ],
+            development=True,
             supported={"shiprocket"},
         ),
         "whatsapp": base_status(
@@ -497,6 +499,10 @@ class TextileTenantRegistrationView(views.APIView):
                 is_active=True,
             )
 
+        from apps.business_tools.sms_bootstrap import ensure_sms_marketing_workspace
+
+        ensure_sms_marketing_workspace(business)
+
         ActivityLog.objects.create(
             business=business,
             user=user,
@@ -524,6 +530,52 @@ class TextileTenantRegistrationView(views.APIView):
                 "paymentsOut": 0,
             },
         }, user, status_code=status.HTTP_201_CREATED)
+
+class PasswordLoginView(views.APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [TenantScopedRateThrottle]
+    throttle_scope = "auth_verify"
+
+    def post(self, request):
+        serializer = PasswordLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        mobile = serializer.validated_data["mobile"]
+        password = serializer.validated_data["password"]
+
+        user = authenticate(request=request, username=mobile, password=password)
+        if user is None:
+            existing = User.objects.filter(
+                mobile=mobile,
+                is_active=True,
+                business__isnull=False,
+            ).first()
+            if existing and not existing.has_usable_password():
+                return Response(
+                    {
+                        "success": False,
+                        "message": "This account does not have a password yet. Create a new workspace or ask your admin to reset access.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response(
+                {"success": False, "message": "Invalid mobile number or password."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.business_id:
+            return Response(
+                {"success": False, "message": "No active tenant user found for this mobile."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        user.last_login_at = timezone.now()
+        user.save(update_fields=["last_login_at"])
+
+        return _session_response({
+            "success": True,
+            "user": UserSerializer(user).data,
+        }, user)
+
 
 class SendOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
@@ -1038,7 +1090,7 @@ class TenantWorkspaceView(views.APIView):
                 "label": "Send due reminders",
                 "value": 0,
                 "count": due_reminders or pending_reminders,
-                "target": "settings",
+                "target": "settings-reminders",
                 "status": "Due" if due_reminders else "Scheduled" if pending_reminders else "Clear",
                 "priority": "high" if due_reminders else "medium" if pending_reminders else "low",
                 "description": (

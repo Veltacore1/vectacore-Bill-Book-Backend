@@ -119,6 +119,8 @@ def production_safety_checks(app_configs, **kwargs):
             "Shipping provider is not connected; online order dispatch and courier tracking will stay disabled.",
             id="accounts.W004",
         ))
+    elif shipping_provider in {"local_stub", "demo", "stub"}:
+        pass
     elif shipping_provider == "shiprocket":
         missing = [
             name

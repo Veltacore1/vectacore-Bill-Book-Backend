@@ -496,6 +496,28 @@ class SMSProviderBoundaryTests(APITestCase):
         self.assertEqual(order.dispatch_status, "new")
         self.assertEqual(order.item.current_stock, 5)
 
+    @override_settings(SHIPPING_PROVIDER="local_stub")
+    def test_create_shipment_local_stub_assigns_awb_without_network(self):
+        order = self.make_online_order()
+
+        with mock.patch("apps.business_tools.shipping.urlopen") as provider_call:
+            response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/create_shipment/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(provider_call.called)
+        order.refresh_from_db()
+        order.item.refresh_from_db()
+        self.assertEqual(order.shipping_provider, "local_stub")
+        self.assertTrue(order.shiprocket_awb_code.startswith("STUB"))
+        self.assertEqual(order.shipping_status, "awb_assigned")
+        self.assertEqual(order.dispatch_status, "shipped")
+        self.assertEqual(order.item.current_stock, 4)
+
+        sync_response = self.client.post(f"/api/v1/business-tools/online-orders/{order.id}/sync_shipping/", {}, format="json")
+        self.assertEqual(sync_response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.shipping_status, "pickup_scheduled")
+
     def test_online_order_manual_lifecycle_deducts_stock_and_marks_cod_paid_on_delivery(self):
         order = self.make_online_order()
 
